@@ -44,12 +44,19 @@ invented: a field the endpoint does not report is simply not written.
 | rate hint (`landing_rate`) | — | `credits` | — | — | — | — |
 | context (`context_length`) | `properties.contextWindow` | `contextLength` | `context_window` | `limit.context` | `contextWindow` | `max_context_size` / `context_window` |
 | input cap (`max_allowed_size`) | — | `maxInputTokens`, `maxAllowedSize` | — | `limit.input` | — | — |
-| output cap (`max_output_tokens`) | `optionSpecs.maxOutputTokens.max` | `maxOutputTokens` | — | `limit.output` | `maxTokens` | — |
+| output cap (`max_out_available`, falls back to `max_output_tokens`) | `optionSpecs.maxOutputTokens.max` | `maxOutputTokens` | — | `limit.output` | `maxTokens` | — |
 | images / video | `inputFormat` | `supportsImages` / `supportsVideos` | `input_modalities` | `modalities.input` | `input` | — |
 | reasoning efforts (`reasoning_*`) | `optionSpecs.reasoningLevel.values` | `supportsReasoning` + `reasoning{…}` | `supported_reasoning_levels` | `reasoning` (bool) | `reasoning` (bool) | — |
 
 ZCode uses the OpenAI wire protocol (`baseUrl = <origin>/v1`) on purpose: its
 reasoning levels are only transmitted as `reasoning_effort` on that path.
+
+The output cap written into clients comes from the endpoint's `max_out_available`
+(the highest value any engine serving that model reports), not from the published
+`max_output_tokens` — the published figure is the *minimum* across engines (a
+promise that holds for the weakest member), and using it would pin every client to
+the weakest engine's limit. Oversized `max_tokens` is clamped upstream rather than
+rejected, so the higher value is safe.
 
 Codex note: every entry in `aster-model-catalog.json` must carry Codex's full
 required field set (`supported_reasoning_levels` — an empty array is fine —

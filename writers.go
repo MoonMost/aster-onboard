@@ -348,7 +348,7 @@ func opencodeModelEntry(p Params, model string) map[string]any {
 	if !ok {
 		return entry
 	}
-	ctx, out := intOf(item.ContextLength), intOf(item.MaxOutputTokens)
+	ctx, out := intOf(item.ContextLength), item.OutCap()
 	if ctx > 0 && out > 0 {
 		limit := map[string]any{"context": ctx, "output": out}
 		if v := intOf(item.MaxAllowedSize); v > 0 {
@@ -439,7 +439,7 @@ func openclawModelEntry(p Params, model string) map[string]any {
 	if v := intOf(item.ContextLength); v > 0 {
 		entry["contextWindow"] = v
 	}
-	if v := intOf(item.MaxOutputTokens); v > 0 {
+	if v := item.OutCap(); v > 0 {
 		entry["maxTokens"] = v
 	}
 	// 输入模态：OpenClaw 文档只写了 text / image（与 OpenCode 的枚举不同，video 未验证⇒不写）。
@@ -707,9 +707,10 @@ func applyZCodeModelRules(config map[string]any, p Params) {
 		}
 		specs := ensureObject(c, "optionSpecs")
 		specs["reasoningLevel"] = map[string]any{"values": toAnySlice(levels)}
-		// 输出上限（官网「输出上限」那一列）：客户端据此知道这个模型最多能吐多少 token，
-		// 内置 api 规则会把它映射成 max_completion_tokens。站点没报就不写。
-		if v := intOf(item.MaxOutputTokens); v > 0 {
+		// 输出上限：客户端据此知道单条回复最多能写多少 token（内置 api 规则映射成
+		// max_completion_tokens）。取**组内可用最高**（item.OutCap()）而不是官网那列的最小——
+		// 那列是最弱成员的承诺值，照它写会把 384K 的模型卡在 32K。站点没报就不写。
+		if v := item.OutCap(); v > 0 {
 			specs["maxOutputTokens"] = map[string]any{"max": v}
 		} else {
 			delete(specs, "maxOutputTokens")
@@ -880,7 +881,7 @@ func fillWorkBuddyCapabilities(entry map[string]any, p Params, model string) {
 	} else {
 		delete(entry, "maxAllowedSize")
 	}
-	if v := intOf(item.MaxOutputTokens); v > 0 {
+	if v := item.OutCap(); v > 0 {
 		entry["maxOutputTokens"] = v
 	} else {
 		delete(entry, "maxOutputTokens")

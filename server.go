@@ -65,21 +65,34 @@ func handleScan(w http.ResponseWriter, _ *http.Request) {
 // （模型/倍率/上下文/输入上限/输出上限/支持图片/支持视频/思考档位/仅思考/默认档位）。
 // 全部原样透传给客户端，不在这里做换算——客户端只负责把它们显示/校验出来。
 type catalogItem struct {
-	ID                string          `json:"id"`
-	Credits           string          `json:"credits,omitempty"`
-	LandingRate       string          `json:"landing_rate,omitempty"`
-	Type              string          `json:"type,omitempty"`
-	SupportsToolCall  *bool           `json:"supports_tool_call,omitempty"`
-	SupportsReasoning *bool           `json:"supports_reasoning,omitempty"`
-	OnlyReasoning     *bool           `json:"only_reasoning,omitempty"`
-	ReasoningEfforts  []string        `json:"reasoning_supported_efforts,omitempty"`
-	DefaultEffort     string          `json:"reasoning_default_effort,omitempty"`
-	SupportsImages    *bool           `json:"supports_images,omitempty"`
-	SupportsVideo     *bool           `json:"supports_video,omitempty"`
-	ContextLength     *int64          `json:"context_length,omitempty"`
-	MaxAllowedSize    *int64          `json:"max_allowed_size,omitempty"`
-	MaxOutputTokens   *int64          `json:"max_output_tokens,omitempty"`
-	VideoSpecs        json.RawMessage `json:"video_specs,omitempty"`
+	ID                string   `json:"id"`
+	Credits           string   `json:"credits,omitempty"`
+	LandingRate       string   `json:"landing_rate,omitempty"`
+	Type              string   `json:"type,omitempty"`
+	SupportsToolCall  *bool    `json:"supports_tool_call,omitempty"`
+	SupportsReasoning *bool    `json:"supports_reasoning,omitempty"`
+	OnlyReasoning     *bool    `json:"only_reasoning,omitempty"`
+	ReasoningEfforts  []string `json:"reasoning_supported_efforts,omitempty"`
+	DefaultEffort     string   `json:"reasoning_default_effort,omitempty"`
+	SupportsImages    *bool    `json:"supports_images,omitempty"`
+	SupportsVideo     *bool    `json:"supports_video,omitempty"`
+	ContextLength     *int64   `json:"context_length,omitempty"`
+	MaxAllowedSize    *int64   `json:"max_allowed_size,omitempty"`
+	MaxOutputTokens   *int64   `json:"max_output_tokens,omitempty"`
+	// MaxOutAvailable = 组内**可用最高**输出（站点 2026-10-04 起下发）。对外那列
+	// max_output_tokens 是"组内最弱那家"（对所有成员都成立的承诺），而客户端配置里那个
+	// 「最大输出 Token」管的是单条回复能写多长——照最弱写会把 384K 的模型卡在 32K。
+	// 缺这个字段（老站点/别的中转）就退回 max_output_tokens。
+	MaxOutAvailable *int64          `json:"max_out_available,omitempty"`
+	VideoSpecs      json.RawMessage `json:"video_specs,omitempty"`
+}
+
+// OutCap 是写进客户端的「最大输出 Token」：优先站点下发的组内可用最高，缺了退回对外那列。
+func (m catalogItem) OutCap() int64 {
+	if v := intOf(m.MaxOutAvailable); v > 0 {
+		return v
+	}
+	return intOf(m.MaxOutputTokens)
 }
 
 // IsMedia：官网把 type=image|video 的行算媒体行（按秒/按张计价，没有 token 规格）。
@@ -152,6 +165,7 @@ func fetchModels(base, key string) ([]catalogItem, error) {
 			ContextLength     *int64          `json:"context_length"`
 			MaxAllowedSize    *int64          `json:"max_allowed_size"`
 			MaxOutputTokens   *int64          `json:"max_output_tokens"`
+			MaxOutAvailable   *int64          `json:"max_out_available"`
 			VideoSpecs        json.RawMessage `json:"video_specs"`
 		} `json:"data"`
 	}
@@ -176,6 +190,7 @@ func fetchModels(base, key string) ([]catalogItem, error) {
 				ContextLength:     d.ContextLength,
 				MaxAllowedSize:    d.MaxAllowedSize,
 				MaxOutputTokens:   d.MaxOutputTokens,
+				MaxOutAvailable:   d.MaxOutAvailable,
 				VideoSpecs:        d.VideoSpecs,
 			})
 		}

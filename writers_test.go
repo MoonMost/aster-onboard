@@ -43,7 +43,9 @@ func params() Params {
 				ReasoningEfforts: []string{"low", "medium", "high"}, DefaultEffort: "high",
 				SupportsImages: bp(true), SupportsVideo: bp(false), SupportsToolCall: bp(true),
 				ContextLength: i64(1000000), MaxAllowedSize: i64(168000), MaxOutputTokens: i64(128000),
-				Type: "chat",
+				// 对外那列（最小）128K，组内可用最高 384K：客户端导入要写后者。
+				MaxOutAvailable: i64(384000),
+				Type:            "chat",
 			},
 			{
 				ID: "qwen3-max", SupportsReasoning: bp(true), OnlyReasoning: bp(true),
@@ -299,6 +301,10 @@ func TestZCodeWritesModelCapabilities(t *testing.T) {
 	if len(levels) != 3 || levels[0] != "low" || levels[2] != "high" {
 		t.Fatalf("档位清单不对：%v", levels)
 	}
+	// 输出上限取组内可用最高（384K），不是对外那列的最小（128K）
+	if m := cfg["optionSpecs"].(map[string]any)["maxOutputTokens"].(map[string]any)["max"]; m != float64(384000) {
+		t.Fatalf("ZCode 输出上限应取 max_out_available：%v", m)
+	}
 	qwen := byID["qwen3-max"]
 	if qwen == nil {
 		t.Fatal("qwen3-max 规则没建立")
@@ -343,8 +349,9 @@ func TestWorkBuddyWritesReasoningCapabilities(t *testing.T) {
 	if glm["maxInputTokens"] != float64(168000) || glm["maxAllowedSize"] != float64(168000) {
 		t.Fatalf("输入上限应取 max_allowed_size：%v", glm)
 	}
-	if glm["maxOutputTokens"] != float64(128000) || glm["contextLength"] != float64(1000000) {
-		t.Fatalf("规格没写：%v", glm)
+	// 输出上限取**组内可用最高**（384K），不是对外那列的最小（128K）
+	if glm["maxOutputTokens"] != float64(384000) || glm["contextLength"] != float64(1000000) {
+		t.Fatalf("输出上限应取 max_out_available：%v", glm)
 	}
 	reasoning := glm["reasoning"].(map[string]any)
 	if reasoning["defaultEffort"] != "high" {
@@ -373,6 +380,7 @@ func TestWorkBuddyWritesReasoningCapabilities(t *testing.T) {
 	p.Catalog[0].SupportsReasoning = bp(false)
 	p.Catalog[0].ContextLength = nil
 	p.Catalog[0].MaxOutputTokens = nil
+	p.Catalog[0].MaxOutAvailable = nil
 	p.Catalog[0].MaxAllowedSize = nil
 	if _, err := applyClient(clientByID(t, "workbuddy"), p); err != nil {
 		t.Fatal(err)
@@ -407,7 +415,7 @@ func TestClientCatalogsCarryOfficialColumns(t *testing.T) {
 	models := oc["provider"].(map[string]any)["aster"].(map[string]any)["models"].(map[string]any)
 	glm := models["glm-5"].(map[string]any)
 	limit := glm["limit"].(map[string]any)
-	if limit["context"] != float64(1000000) || limit["output"] != float64(128000) || limit["input"] != float64(168000) {
+	if limit["context"] != float64(1000000) || limit["output"] != float64(384000) || limit["input"] != float64(168000) {
 		t.Fatalf("OpenCode limit 没按官网列写：%v", limit)
 	}
 	mods := glm["modalities"].(map[string]any)["input"].([]any)
@@ -423,7 +431,7 @@ func TestClientCatalogsCarryOfficialColumns(t *testing.T) {
 	root := readJSON(filepath.Join(home, ".openclaw", "openclaw.json"))
 	list := root["models"].(map[string]any)["providers"].(map[string]any)["aster"].(map[string]any)["models"].([]any)
 	first := list[0].(map[string]any)
-	if first["contextWindow"] != float64(1000000) || first["maxTokens"] != float64(128000) || first["reasoning"] != true {
+	if first["contextWindow"] != float64(1000000) || first["maxTokens"] != float64(384000) || first["reasoning"] != true {
 		t.Fatalf("OpenClaw 规格没写：%v", first)
 	}
 	if in := first["input"].([]any); len(in) != 2 || in[1] != "image" {
@@ -465,13 +473,50 @@ func TestClientCatalogsCarryOfficialColumns(t *testing.T) {
 	_ = p
 }
 
+// TestOutputCapFallsBackToReported：站点没下发 max_out_available（老站点/别的中转）时，
+// 各客户端要退回对外那列 max_output_tokens，不能把这一格写空。
+func TestOutputCapFallsBackToReported(t *testing.T) {
+	home := sandbox(t)
+	os.MkdirAll(filepath.Join(home, ".workbuddy-ai"), 0o755)
+	p := params()
+	p.Catalog[0].MaxOutAvailable = nil // glm-5 只剩对外那列 128K
+
+	if _, err := applyClient(clientByID(t, "workbuddy"), p); err != nil {
+		t.Fatal(err)
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal([]byte(readText(filepath.Join(home, ".workbuddy-ai", "models.json"))), &arr); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range arr {
+		if m["id"] == "glm-5" && m["maxOutputTokens"] != float64(128000) {
+			t.Fatalf("缺 max_out_available 时应退回对外那列：%v", m["maxOutputTokens"])
+		}
+	}
+
+	if _, err := applyClient(clientByID(t, "zcode"), p); err != nil {
+		t.Fatal(err)
+	}
+	z := readJSON(filepath.Join(home, ".zcode", "v2", "provider_config.json"))
+	for _, r := range z["config"].(map[string]any)["modelConfigRules"].(map[string]any)["providerModelRules"].([]any) {
+		rm := r.(map[string]any)
+		if rm["providerId"] != "aster" || rm["modelId"] != "glm-5" {
+			continue
+		}
+		specs := rm["config"].(map[string]any)["optionSpecs"].(map[string]any)
+		if got := specs["maxOutputTokens"].(map[string]any)["max"]; got != float64(128000) {
+			t.Fatalf("ZCode 缺 max_out_available 时应退回对外那列：%v", got)
+		}
+	}
+}
+
 // TestFetchModelsCarriesCapabilities：能力字段（思考档位/媒体/上下文）也必须一路带回前端，
 // 否则写出来的覆盖层是空的——ZCode 没档位、WorkBuddy 没思考强度都是这个链路上丢的。
 func TestFetchModelsCarriesCapabilities(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"data":[{"id":"space-bunny","supports_reasoning":true,"only_reasoning":true,
 			"reasoning_supported_efforts":["low","medium","high","xhigh","max"],"reasoning_default_effort":"max",
-			"supports_images":true,"supports_video":true,"context_length":1000000,"max_output_tokens":128000}]}`)
+			"supports_images":true,"supports_video":true,"context_length":1000000,"max_output_tokens":128000,"max_out_available":384000}]}`)
 	}))
 	defer srv.Close()
 
@@ -488,6 +533,9 @@ func TestFetchModelsCarriesCapabilities(t *testing.T) {
 	}
 	if m.SupportsVideo == nil || !*m.SupportsVideo || m.ContextLength == nil || *m.ContextLength != 1000000 {
 		t.Fatalf("媒体/上下文没带回来：%+v", m)
+	}
+	if m.MaxOutAvailable == nil || *m.MaxOutAvailable != 384000 {
+		t.Fatalf("组内可用最高输出没带回来：%+v", m)
 	}
 }
 

@@ -5,13 +5,13 @@
 		"FileVersion": {
 			"Major": 1,
 			"Minor": 0,
-			"Patch": 1,
+			"Patch": 2,
 			"Build": 0
 		},
 		"ProductVersion": {
 			"Major": 1,
 			"Minor": 0,
-			"Patch": 1,
+			"Patch": 2,
 			"Build": 0
 		},
 		"FileFlagsMask": "3f",
@@ -24,14 +24,14 @@
 		"Comments": "本机离线运行，不联网、不上传任何数据。",
 		"CompanyName": "Aster",
 		"FileDescription": "Aster 接入助手 - 中转站客户端配置工具",
-		"FileVersion": "1.0.1.0",
+		"FileVersion": "1.0.2.0",
 		"InternalName": "AsterOnboard",
 		"LegalCopyright": "",
 		"LegalTrademarks": "",
 		"OriginalFilename": "aster-onboard.exe",
 		"PrivateBuild": "",
 		"ProductName": "Aster 接入助手",
-		"ProductVersion": "1.0.1.0",
+		"ProductVersion": "1.0.2.0",
 		"SpecialBuild": ""
 	},
 	"VarFileInfo": {
