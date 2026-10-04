@@ -55,13 +55,18 @@ Windows 11 and on any Win10 that has an up-to-date Edge). If it is missing, the
 tool says so and offers to open the same UI in your default browser instead.
 
 The app is a single self-contained `.exe` — no installer, no external DLL, no
-admin rights (it runs `asInvoker`).
+admin rights (it runs `asInvoker`). Builds are produced by GitHub Actions from
+this repository's source and published on the
+[releases page](https://github.com/MoonMost/aster-onboard/releases).
 
-> The build is not code-signed yet. SmartScreen may show "Windows protected
-> your PC" on first run — choose *More info → Run anyway*. Some AV engines
-> flag freshly built, unsigned binaries that read credentials and write other
-> apps' config files; that behaviour is exactly this tool's job, and the
-> binaries are built from this repository's source by GitHub Actions.
+> Free code signing provided by [SignPath.io](https://signpath.io/), certificate
+> by [SignPath Foundation](https://signpath.org/).
+>
+> Until a given release has been signed, SmartScreen may show "Windows
+> protected your PC" on first run — choose *More info → Run anyway*. Some AV
+> engines also flag freshly built, unsigned binaries that read credentials and
+> write other apps' config files; that behaviour is exactly this tool's job,
+> and it is why the project is applying for code signing.
 
 ## macOS
 
