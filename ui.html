@@ -1,0 +1,890 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aster 接入导入器</title>
+<style>
+  :root {
+    --bg: #ececec;
+    --panel: #ffffff;
+    --panel-2: #f2f2f4;
+    --field-bg: #ffffff;
+    --line: rgba(0, 0, 0, .1);
+    --line-strong: rgba(0, 0, 0, .18);
+    --fg: #1d1d1f;
+    --dim: #86868b;
+    --dim-2: #a6a6ab;
+    --acc: #7c3aed;
+    --acc-hi: #8b5cf6;
+    --acc-soft: rgba(124, 58, 237, .12);
+    --ring: rgba(124, 58, 237, .28);
+    --btn: #7c3aed;
+    --btn-hi: #8f5cf7;
+    --btn-fg: #ffffff;
+    --ok: #34c759;
+    --warn: #ff9f0a;
+    --err: #ff3b30;
+    --log-bg: #fafafa;
+    --chrome-line: rgba(0, 0, 0, .08);
+    --shadow: 0 .5px 1px rgba(0, 0, 0, .05);
+    --mono: "Cascadia Mono", Consolas, "SF Mono", ui-monospace, monospace;
+  }
+  html[data-theme="dark"] {
+    --bg: #1e1e1e;
+    --panel: #2a2a2c;
+    --panel-2: #232325;
+    --field-bg: rgba(255, 255, 255, .06);
+    --line: rgba(255, 255, 255, .1);
+    --line-strong: rgba(255, 255, 255, .18);
+    --fg: #f2f2f4;
+    --dim: #98989d;
+    --dim-2: #6e6e73;
+    --acc: #a78bfa;
+    --acc-hi: #b79dfb;
+    --acc-soft: rgba(167, 139, 250, .16);
+    --ring: rgba(167, 139, 250, .32);
+    --btn: #7c3aed;
+    --btn-hi: #8b5cf6;
+    --btn-fg: #ffffff;
+    --ok: #30d158;
+    --warn: #ffd60a;
+    --err: #ff453a;
+    --log-bg: #232325;
+    --chrome-line: rgba(255, 255, 255, .07);
+    --shadow: none;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.47 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", sans-serif;
+    letter-spacing: -.08px;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  html:not(.native) body { overflow: auto; }
+  html.native body { overflow: hidden; }
+  /* macOS 里按钮是箭头光标（不是手型），别用网页那套 pointer */
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: default; }
+  input { font: inherit; color: inherit; }
+  ::selection { background: var(--acc-soft); }
+
+  /* ---------- 原生外框：标题栏 + 边缘缩放手势 ---------- */
+  .chrome { display: none; }
+  html.native .chrome { display: block; }
+  .titlebar {
+    position: fixed; top: 0; left: 0; right: 0; height: 52px;
+    display: flex; align-items: center; padding: 0 16px;
+    border-bottom: .5px solid var(--chrome-line);   /* 工具栏下面的发丝线 */
+    z-index: 30; -webkit-user-select: none; user-select: none;
+  }
+  .lights { display: flex; gap: 8px; align-items: center; z-index: 2; }
+  .light {
+    width: 12px; height: 12px; border-radius: 50%;
+    border: .5px solid rgba(0, 0, 0, .15);
+    display: grid; place-items: center; padding: 0;
+  }
+  .light svg { opacity: 0; transition: opacity .12s; }
+  .lights:hover .light svg { opacity: 1; }
+  .light.close { background: #ff5f57; } .light.close svg { stroke: #7d0f0a; }
+  .light.min   { background: #febc2e; } .light.min svg   { stroke: #8a5a00; }
+  .light.zoom  { background: #28c840; } .light.zoom svg  { stroke: #0b5f18; }
+  .tb-title {
+    position: absolute; left: 0; right: 0; text-align: center;
+    font-size: 13px; font-weight: 600; letter-spacing: 0;
+    pointer-events: none; color: var(--fg);
+  }
+  .tb-right { margin-left: auto; z-index: 2; }
+  .tbtn {
+    font-size: 11.5px; color: var(--dim); padding: 3px 9px; border-radius: 5px;
+    border: .5px solid transparent;
+  }
+  .tbtn:hover { background: rgba(127, 127, 127, .14); color: var(--fg); border-color: var(--line); }
+  .tbtn:active { background: rgba(127, 127, 127, .22); }
+  .rz { position: fixed; z-index: 40; }
+  .rz.n { top: 0; left: 8px; right: 8px; height: 5px; cursor: ns-resize; }
+  .rz.s { bottom: 0; left: 8px; right: 8px; height: 5px; cursor: ns-resize; }
+  .rz.w { left: 0; top: 8px; bottom: 8px; width: 5px; cursor: ew-resize; }
+  .rz.e { right: 0; top: 8px; bottom: 8px; width: 5px; cursor: ew-resize; }
+  .rz.nw { top: 0; left: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+  .rz.ne { top: 0; right: 0; width: 10px; height: 10px; cursor: nesw-resize; }
+  .rz.sw { bottom: 0; left: 0; width: 10px; height: 10px; cursor: nesw-resize; }
+  .rz.se { bottom: 0; right: 0; width: 10px; height: 10px; cursor: nwse-resize; }
+
+  /* ---------- 内容骨架 ---------- */
+  .content {
+    height: 100%;
+    padding: 58px 16px 16px;
+    display: grid;
+    grid-template-columns: 344px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) minmax(112px, 152px);
+    gap: 12px;
+  }
+  html:not(.native) .content { height: auto; min-height: 100%; padding-top: 20px; grid-template-rows: minmax(0, 1fr) auto; }
+  .col-left { grid-column: 1; grid-row: 1; display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; }
+  .col-main { grid-column: 2; grid-row: 1; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+  .col-log { grid-column: 1 / 3; grid-row: 2; min-height: 0; display: flex; }
+
+  .panel {
+    background: var(--panel);
+    border: .5px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .panel.grow { flex: 1; }
+  .p-head {
+    padding: 10px 14px 7px;
+    font-size: 11px; font-weight: 600; letter-spacing: .1px; color: var(--dim);
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .p-head .aside { font-weight: 400; color: var(--dim-2); font-size: 11px; }
+  .p-body { padding: 2px 14px 14px; min-height: 0; }
+  .p-body.scroll { overflow: auto; padding-right: 10px; }
+
+  /* ---------- 连接中转站 ---------- */
+  .field { margin-bottom: 10px; }
+  .field label { display: block; font-size: 11px; color: var(--dim); margin-bottom: 5px; }
+  .ipt-wrap { position: relative; }
+  input[type=password], input[type=text] {
+    width: 100%; height: 28px; padding: 0 9px;
+    background: var(--field-bg); color: var(--fg);
+    border: .5px solid var(--line-strong); border-radius: 6px;
+    box-shadow: inset 0 1px 1px rgba(0, 0, 0, .05);
+    outline: none; transition: border-color .1s, box-shadow .1s;
+  }
+  input:focus { border-color: var(--acc); box-shadow: 0 0 0 3px var(--ring); }
+  input::placeholder { color: var(--dim-2); }
+  .eye {
+    position: absolute; right: 3px; top: 3px; width: 22px; height: 22px;
+    display: grid; place-items: center; border-radius: 5px; color: var(--dim);
+  }
+  .eye:hover { background: rgba(127, 127, 127, .14); }
+  .ipt-key input { padding-right: 30px; font-family: var(--mono); font-size: 12px; letter-spacing: .2px; }
+  /* macOS 推按钮：6px 圆角、细描边、极淡的顶高光，按下才明显变化（不是网页那种 hover 变亮+缩放） */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: 28px; padding: 0 13px; border-radius: 6px;
+    font-size: 12.5px; font-weight: 500; white-space: nowrap;
+    border: .5px solid var(--line-strong);
+    background: linear-gradient(rgba(255, 255, 255, .9), rgba(255, 255, 255, 0)) var(--panel);
+    box-shadow: 0 1px 1.5px rgba(0, 0, 0, .08);
+  }
+  html[data-theme="dark"] .btn:not(.primary) {
+    background: linear-gradient(rgba(255, 255, 255, .07), rgba(255, 255, 255, .02)) var(--panel);
+    box-shadow: 0 1px 1.5px rgba(0, 0, 0, .35);
+  }
+  .btn:hover { filter: brightness(1.04); }
+  .btn:active { filter: brightness(.94); }
+  .btn:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
+  .btn.primary {
+    background: linear-gradient(var(--btn-hi), var(--btn));
+    border-color: rgba(0, 0, 0, .12); color: var(--btn-fg);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, .18), inset 0 1px 0 rgba(255, 255, 255, .18);
+  }
+  .btn.primary:hover { filter: brightness(1.05); }
+  .btn.primary:active { filter: brightness(.92); }
+  .btn.wide { width: 100%; }
+  .btn:disabled { opacity: .38; cursor: default; filter: none; }
+  .hint { font-size: 11px; color: var(--dim); line-height: 1.45; }
+  .status { display: flex; gap: 6px; align-items: flex-start; margin-top: 9px; font-size: 11px; color: var(--dim); line-height: 1.45; }
+  .status .dot { flex: none; margin-top: 4px; }
+  .status.ok { color: var(--ok); } .status.err { color: var(--err); }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--dim-2); display: inline-block; }
+  .dot.ok { background: var(--ok); } .dot.warn { background: var(--warn); } .dot.err { background: var(--err); }
+  .pulse { animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) { .pulse { animation: none; } }
+
+  /* ---------- 模型清单 ---------- */
+  .models { display: flex; flex-wrap: wrap; gap: 5px; }
+  .chip {
+    font-size: 11px; padding: 2px 7px; border-radius: 5px;
+    background: rgba(0, 0, 0, .05);
+    color: var(--fg); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  html[data-theme="dark"] .chip { background: rgba(255, 255, 255, .08); }
+  .chip.more { color: var(--dim); }
+  /* 倍率是站点下发的消耗倍率，写进客户端后它自己显示；这里只做写入前的可见确认 */
+  .chip .rate { color: var(--dim); margin-left: 5px; font-variant-numeric: tabular-nums; }
+  .models .empty { color: var(--dim-2); font-size: 11px; }
+
+  /* ---------- 客户端列表 ---------- */
+  .list { flex: 1; overflow: auto; min-height: 0; }
+  .row {
+    position: relative;
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 14px;
+  }
+  /* 分隔线从复选框之后开始（macOS 列表的分隔线不顶到左边） */
+  .row::after {
+    content: ""; position: absolute; left: 40px; right: 0; bottom: 0;
+    height: .5px; background: var(--line);
+  }
+  .row:last-child::after { display: none; }
+  .row.off { opacity: .55; }
+  .cbx { flex: none; width: 16px; height: 16px; position: relative; display: grid; place-items: center; }
+  .cbx input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: default; }
+  .cbx .box {
+    width: 14px; height: 14px; border-radius: 4px;
+    border: .5px solid var(--line-strong); background: var(--field-bg);
+    box-shadow: inset 0 1px 1px rgba(0, 0, 0, .06);
+    display: grid; place-items: center; pointer-events: none;
+    transition: background .1s, border-color .1s;
+  }
+  .cbx .box svg { opacity: 0; stroke: #fff; }
+  .cbx input:checked + .box {
+    background: linear-gradient(var(--acc-hi), var(--acc));
+    border-color: rgba(0, 0, 0, .14);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .28);
+  }
+  .cbx input:checked + .box svg { opacity: 1; }
+  .cbx input:focus-visible + .box { box-shadow: 0 0 0 3px var(--ring); }
+  .who { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 7px; }
+  .who .nm { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .who .kd { font-size: 11px; color: var(--dim-2); flex: none; }
+  .st { flex: none; width: 76px; display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--dim); }
+  .st.ok { color: var(--fg); }
+  .undo { flex: none; font-size: 11.5px; color: var(--acc); padding: 2px 6px; border-radius: 5px; visibility: hidden; }
+  .undo.on { visibility: visible; }
+  .undo:hover { background: var(--acc-soft); }
+  .undo:active { opacity: .7; }
+  .p-foot { border-top: .5px solid var(--line); padding: 7px 14px; display: flex; align-items: center; gap: 10px; }
+  .p-foot .hint { flex: 1; }
+
+  /* ---------- 日志 ---------- */
+  .log {
+    flex: 1; min-height: 0; overflow: auto;
+    margin: 0 8px 8px 8px; padding: 8px 10px;
+    background: var(--log-bg); border: .5px solid var(--line); border-radius: 6px;
+    font-family: var(--mono); font-size: 11px; line-height: 1.6; color: var(--dim);
+    user-select: text;
+  }
+  html[data-theme="dark"] .log { border-color: transparent; }
+  .log .ln { white-space: pre-wrap; word-break: break-all; }
+  .log .ln b { color: var(--dim-2); font-weight: 400; }
+  .log .ln.ok { color: var(--ok); }
+  .log .ln.err { color: var(--err); }
+  .log .ln.hl { color: var(--fg); }
+
+  /* ---------- 悬停提示（自绘，代替原生 title —— WebView2 里原生提示不弹） ---------- */
+  .tip {
+    position: fixed; z-index: 120; pointer-events: none;
+    max-width: 540px; padding: 8px 10px;
+    background: rgba(28, 28, 30, .96); color: #f2f2f4;
+    border: .5px solid rgba(255, 255, 255, .14); border-radius: 7px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, .4);
+    font: 11.5px/1.6 var(--mono); white-space: pre-line;
+  }
+  html[data-theme="light"] .tip { background: rgba(48, 48, 50, .96); color: #f5f5f7; }
+
+  /* ---------- 右键菜单（自绘，macOS 弹层观感） ---------- */
+  .ctx {
+    position: fixed; z-index: 95; min-width: 156px; padding: 4px;
+    background: var(--panel); border: .5px solid var(--line-strong); border-radius: 8px;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, .2), 0 0 0 .5px rgba(0, 0, 0, .06);
+  }
+  html[data-theme="dark"] .ctx { box-shadow: 0 8px 26px rgba(0, 0, 0, .55), 0 0 0 .5px rgba(255, 255, 255, .08); }
+  .ctx button {
+    display: flex; align-items: center; justify-content: space-between; gap: 18px;
+    width: 100%; padding: 5px 10px; border-radius: 5px; font-size: 12.5px; text-align: left;
+  }
+  .ctx button:hover:not(:disabled) { background: var(--acc); color: #fff; }
+  html[data-theme="dark"] .ctx button:hover:not(:disabled) { color: #17101f; }
+  .ctx button:disabled { opacity: .4; cursor: default; }
+  .ctx .k { font-size: 11px; color: var(--dim-2); }
+  .ctx button:hover:not(:disabled) .k { color: inherit; }
+
+  /* ---------- 模态（mac 表单风格） ---------- */
+  .veil { position: fixed; inset: 0; background: rgba(0, 0, 0, .28); z-index: 100; display: none; }
+  .veil.on { display: block; }
+  .modal {
+    position: fixed; left: 50%; top: 38%; transform: translate(-50%, -50%);
+    width: 320px; background: var(--panel); border-radius: 12px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, .3), 0 0 0 .5px rgba(0, 0, 0, .1);
+    padding: 18px 18px 14px; z-index: 101; display: none; text-align: center;
+  }
+  .modal.on { display: block; }
+  .modal h3 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  .modal p { margin: 0 0 16px; font-size: 12px; color: var(--dim); line-height: 1.5; }
+  .modal .acts { display: flex; gap: 8px; }
+  .modal .acts .btn { flex: 1; }
+  .modal .btn.danger { background: var(--err); border-color: transparent; color: #fff; }
+
+  /* ---------- 滚动条（macOS 覆盖式） ---------- */
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: rgba(127, 127, 127, .35); border-radius: 5px; border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(127, 127, 127, .55); border: 2px solid transparent; background-clip: content-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  .toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%) translateY(8px);
+    background: var(--fg); color: var(--bg); font-size: 12px; font-weight: 500;
+    padding: 7px 14px; border-radius: 20px; opacity: 0; pointer-events: none;
+    transition: opacity .18s, transform .18s; z-index: 110;
+  }
+  .toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<div class="chrome" aria-hidden="false">
+  <header class="titlebar" id="titlebar">
+    <div class="lights" id="lights">
+      <button class="light close" id="wClose" aria-label="关闭" title="关闭">
+        <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke-width="1.1" stroke-linecap="round"><path d="M1.2 1.2 4.8 4.8 M4.8 1.2 1.2 4.8"/></svg>
+      </button>
+      <button class="light min" id="wMin" aria-label="最小化" title="最小化">
+        <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke-width="1.1" stroke-linecap="round"><path d="M1.2 3 H4.8"/></svg>
+      </button>
+      <button class="light zoom" id="wZoom" aria-label="缩放" title="缩放">
+        <svg width="6" height="6" viewBox="0 0 6 6" fill="none" stroke-width="1.1" stroke-linecap="round"><path d="M3 1.2 V4.8 M1.2 3 H4.8"/></svg>
+      </button>
+    </div>
+    <div class="tb-title">Aster 接入导入器</div>
+    <div class="tb-right"><button class="tbtn" id="btnRescan">重新扫描</button></div>
+  </header>
+  <div class="rz n" data-edge="top"></div>
+  <div class="rz s" data-edge="bottom"></div>
+  <div class="rz w" data-edge="left"></div>
+  <div class="rz e" data-edge="right"></div>
+  <div class="rz nw" data-edge="topleft"></div>
+  <div class="rz ne" data-edge="topright"></div>
+  <div class="rz sw" data-edge="bottomleft"></div>
+  <div class="rz se" data-edge="bottomright"></div>
+</div>
+
+<main class="content">
+  <section class="col-left">
+    <div class="panel">
+      <div class="p-head">连接中转站</div>
+      <div class="p-body">
+        <div class="field ipt-wrap ipt-key">
+          <label for="key">密钥</label>
+          <input type="password" id="key" placeholder="sk-…（朋友发你的那串）" autocomplete="off" spellcheck="false" autofocus>
+          <button class="eye" id="btnEye" aria-label="显示密钥" title="显示密钥">
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2"><path d="M1.5 8s2.4-4.2 6.5-4.2S14.5 8 14.5 8s-2.4 4.2-6.5 4.2S1.5 8 1.5 8Z"/><circle cx="8" cy="8" r="1.9"/></svg>
+          </button>
+        </div>
+        <div class="field">
+          <label for="base">接口地址</label>
+          <input type="text" id="base" value="https://api.xiaoshi888.top" spellcheck="false">
+        </div>
+        <button class="btn primary wide" id="btnVerify">验证密钥并拉取模型</button>
+        <div class="status" id="verifyMsg"><span class="dot"></span><span id="verifyText">填好密钥后验证；验证通过才能写入。</span></div>
+      </div>
+    </div>
+    <div class="panel grow">
+      <div class="p-head">模型清单 <span class="aside" id="modelsCount"></span></div>
+      <div class="p-body scroll" style="display:flex;flex-direction:column;">
+        <div class="models" id="models"><span class="empty">验证后显示中转站开放的全部模型。</span></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="col-main">
+    <div class="panel grow">
+      <div class="p-head">本机客户端 <span class="aside" id="scanCount"></span></div>
+      <div class="list" id="rows"></div>
+      <div class="p-foot">
+        <span class="hint">「恢复」把配置还原成本工具写入的样子；「撤销」回到工具动它之前的状态。运行中的客户端建议先退出。</span>
+      </div>
+    </div>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="hint" id="applyNote" style="flex:1;">先验证密钥，再勾选要写入的客户端。</span>
+      <button class="btn primary" id="btnApply" disabled>写入所选配置</button>
+    </div>
+  </section>
+
+  <section class="col-log">
+    <div class="panel grow">
+      <div class="p-head">日志</div>
+      <div class="log" id="log"></div>
+    </div>
+  </section>
+</main>
+
+<div class="tip" id="tip" hidden></div>
+
+<div class="ctx" id="ctx" hidden></div>
+
+<div class="veil" id="veil"></div>
+<div class="modal" id="modal">
+  <h3 id="mTitle">恢复配置</h3>
+  <p id="mText"></p>
+  <div class="acts">
+    <button class="btn" id="mCancel">取消</button>
+    <button class="btn primary" id="mOk">继续</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const state = { models: [], rates: {}, rows: [], pick: {}, busy: false, native: false, dark: false };
+
+/* ---------- 小工具 ---------- */
+async function api(path, opts) {
+  const resp = await fetch(path, opts);
+  const text = await resp.text();
+  if (!resp.ok) throw new Error((text || '').trim() || ('HTTP ' + resp.status));
+  return text ? JSON.parse(text) : null;
+}
+function log(msg, cls) {
+  const box = $('log');
+  const line = document.createElement('div');
+  line.className = 'ln' + (cls ? ' ' + cls : '');
+  const t = new Date().toTimeString().slice(0, 8);
+  line.innerHTML = '<b>' + t + '</b>  ';
+  line.appendChild(document.createTextNode(msg));
+  const stick = box.scrollTop + box.clientHeight > box.scrollHeight - 24;
+  box.appendChild(line);
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+let toastTimer = 0;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('on'), 1800);
+}
+function setStatus(kind, text) {
+  const box = $('verifyMsg'), t = $('verifyText');
+  box.className = 'status' + (kind ? ' ' + kind : '');
+  box.firstElementChild.className = 'dot' + (kind === 'ok' ? ' ok' : kind === 'err' ? ' err' : kind === 'busy' ? ' pulse' : '');
+  t.textContent = text;
+}
+let modalResolve = null;
+function ask(title, text, okText, danger) {
+  $('mTitle').textContent = title;
+  $('mText').textContent = text;
+  const ok = $('mOk');
+  ok.textContent = okText;
+  ok.className = 'btn ' + (danger ? 'danger' : 'primary');
+  $('veil').classList.add('on');
+  $('modal').classList.add('on');
+  return new Promise(r => { modalResolve = r; });
+}
+function closeAsk(v) {
+  $('veil').classList.remove('on');
+  $('modal').classList.remove('on');
+  if (modalResolve) { const r = modalResolve; modalResolve = null; r(v); }
+}
+$('mCancel').onclick = () => closeAsk(false);
+$('mOk').onclick = () => closeAsk(true);
+$('veil').onclick = () => closeAsk(false);
+
+/* ---------- 窗口层（无边框窗口时才启用） ---------- */
+function winCtl(action, edge) {
+  if (!state.native) return;
+  api('/api/win/action', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, edge: edge || '' })
+  }).catch(() => {});
+}
+function initChrome() {
+  document.documentElement.classList.add('native');
+  $('titlebar').addEventListener('mousedown', e => {
+    if (e.button !== 0) return;
+    if (e.target.closest('button')) return;
+    e.preventDefault();
+    winCtl('drag');
+  });
+  $('titlebar').addEventListener('dblclick', e => {
+    if (e.target.closest('button')) return;
+    winCtl('maximize');
+  });
+  document.querySelectorAll('.rz').forEach(z => {
+    z.addEventListener('mousedown', e => { if (e.button === 0) { e.preventDefault(); winCtl('resize', z.dataset.edge); } });
+  });
+  $('wClose').onclick = () => winCtl('close');
+  $('wMin').onclick = () => winCtl('minimize');
+  $('wZoom').onclick = () => winCtl('maximize');
+}
+
+/* ---------- 右键菜单（自绘；剪贴板走 Go 的 /api/clipboard，不依赖浏览器权限） ---------- */
+function ctxClose() { $('ctx').hidden = true; }
+function ctxItem(label, key, enabled, act) {
+  const b = document.createElement('button');
+  b.disabled = !enabled;
+  const t = document.createElement('span');
+  t.textContent = label;
+  b.appendChild(t);
+  if (key) {
+    const k = document.createElement('span');
+    k.className = 'k';
+    k.textContent = key;
+    b.appendChild(k);
+  }
+  b.onclick = () => { ctxClose(); act(); };
+  return b;
+}
+function ctxShow(x, y, items) {
+  const ctx = $('ctx');
+  ctx.innerHTML = '';
+  for (const it of items) ctx.appendChild(ctxItem(it[0], it[1], it[2], it[3]));
+  ctx.hidden = false;
+  const r = ctx.getBoundingClientRect();
+  ctx.style.left = Math.max(6, Math.min(x, window.innerWidth - r.width - 8)) + 'px';
+  ctx.style.top = Math.max(6, Math.min(y, window.innerHeight - r.height - 8)) + 'px';
+}
+async function clipGet() { return (await api('/api/clipboard')).text || ''; }
+function clipSet(text) {
+  return api('/api/clipboard', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text })
+  });
+}
+document.addEventListener('contextmenu', e => {
+  const el = e.target;
+  const isInput = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA');
+  const inLog = !!(el && el.closest && el.closest('#log'));
+  if (!isInput && !inLog) return;
+  e.preventDefault();
+  const sel = window.getSelection();
+  const range = isInput ? [el.selectionStart, el.selectionEnd] : [0, 0];
+  const hasSel = isInput ? range[1] > range[0] : !!(sel && !sel.isCollapsed);
+  const items = [];
+  if (isInput) {
+    items.push(['剪切', 'Ctrl+X', hasSel, () => {
+      clipSet(el.value.slice(range[0], range[1])).then(() => {
+        el.setRangeText('', range[0], range[1], 'end');
+        el.dispatchEvent(new Event('input'));
+      });
+    }]);
+  }
+  items.push(['复制', 'Ctrl+C', hasSel, () => clipSet(isInput ? el.value.slice(range[0], range[1]) : sel.toString())]);
+  if (isInput) {
+    items.push(['粘贴', 'Ctrl+V', true, async () => {
+      const t = await clipGet();
+      if (!t) return;
+      el.focus();
+      el.setRangeText(t, range[0], range[1], 'end');
+      el.dispatchEvent(new Event('input'));
+    }]);
+  }
+  items.push(['全选', 'Ctrl+A', true, () => {
+    if (isInput) { el.focus(); el.select(); return; }
+    const r = document.createRange();
+    r.selectNodeContents($('log'));
+    const s = window.getSelection();
+    s.removeAllRanges();
+    s.addRange(r);
+  }]);
+  ctxShow(e.clientX, e.clientY, items);
+});
+document.addEventListener('mousedown', e => { if (!e.target.closest('#ctx')) ctxClose(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') ctxClose(); });
+window.addEventListener('blur', ctxClose);
+
+/* ---------- 扫描与列表 ---------- */
+const MODEL_HINTS = [
+  [/claude|zcode|antigravity/i, ['claude', 'sonnet', 'opus']],
+  [/codex|opencode/i, ['codex', 'gpt']],
+  [/kimi/i, ['kimi']],
+  [/grok/i, ['grok']],
+  [/hermes/i, ['gemini', 'qwen']],
+  [/workbuddy|openclaw/i, ['qwen', 'glm']],
+];
+function defaultPick(row) {
+  for (const [re, keys] of MODEL_HINTS) {
+    if (!re.test(row.name + ' ' + row.id)) continue;
+    for (const k of keys) {
+      const hit = state.models.find(m => m.toLowerCase().includes(k));
+      if (hit) return hit;
+    }
+  }
+  return state.models[0] || '';
+}
+function applyRow(row) {
+  const tr = document.createElement('div');
+  tr.className = 'row' + (row.installed ? '' : ' off');
+  tr.dataset.id = row.id;
+
+  // 悬停看这个客户端"看的是哪个文件"：装了的显示检测依据+写入目标，没装的显示找过哪些位置
+  const cfgPaths = (row.paths || []).join('\n');
+  if (row.installed) {
+    const ev = (row.evidence || []).join('\n');
+    tr.dataset.tip = (ev ? '检测到：\n' + ev + '\n\n' : '') + '写入的配置文件：\n' + cfgPaths;
+  } else {
+    tr.dataset.tip = '没找到，按这些位置判断（装了但不在这些位置的认不到）：\n' + cfgPaths;
+  }
+
+  const cbx = document.createElement('label');
+  cbx.className = 'cbx';
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.disabled = !row.installed;
+  cb.checked = !!row.installed && !row.managed;
+  cb.onchange = () => updateApply();
+  const box = document.createElement('span');
+  box.className = 'box';
+  box.innerHTML = '<svg width="8" height="8" viewBox="0 0 8 8" fill="none" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M1.2 4.1 3 6 6.8 1.9"/></svg>';
+  cbx.append(cb, box);
+
+  const who = document.createElement('div');
+  who.className = 'who';
+  who.innerHTML = '<span class="nm"></span><span class="kd"></span>';
+  who.querySelector('.nm').textContent = row.name;
+  who.querySelector('.kd').textContent = row.kind;
+
+  const st = document.createElement('div');
+  st.className = 'st' + (row.managed ? ' ok' : '');
+  st.innerHTML = '<i class="dot ' + (!row.installed ? '' : row.managed ? 'ok' : 'warn') + '"></i>';
+  st.appendChild(document.createTextNode(!row.installed ? '未安装' : row.managed ? '已托管' : '未托管'));
+
+  const restoreBtn = document.createElement('button');
+  restoreBtn.className = 'undo' + (row.writtenAt ? ' on' : '');
+  restoreBtn.textContent = '恢复';
+  restoreBtn.dataset.tip = row.writtenAt
+    ? '把配置还原成本工具写入的样子（' + row.writtenAt + '）'
+    : '本工具还没写过这个客户端';
+  restoreBtn.onclick = () => restore(row, 'after');
+
+  const undoBtn = document.createElement('button');
+  undoBtn.className = 'undo' + (row.backupAt ? ' on' : '');
+  undoBtn.textContent = '撤销';
+  undoBtn.dataset.tip = row.backupAt
+    ? '回到本工具写入之前的状态（备份 ' + row.backupAt + '）'
+    : '';
+  undoBtn.onclick = () => restore(row, 'before');
+
+  tr.append(cbx, who, st, restoreBtn, undoBtn);
+  return tr;
+}
+function renderRows() {
+  const box = $('rows');
+  box.innerHTML = '';
+  const sorted = [...state.rows].sort((a, b) => (b.installed - a.installed) || 0);
+  for (const row of sorted) box.appendChild(applyRow(row));
+  const n = state.rows.filter(r => r.installed).length;
+  $('scanCount').textContent = n ? '本机 ' + n + ' 个' : '本机未发现';
+  updateApply();
+}
+function updateApply() {
+  const chosen = [...document.querySelectorAll('#rows input:checked')].length;
+  const btn = $('btnApply');
+  btn.disabled = state.busy || !state.models.length || !chosen;
+  btn.textContent = chosen ? '写入所选配置（' + chosen + '）' : '写入所选配置';
+  $('applyNote').textContent = !state.models.length
+    ? '先验证密钥，再勾选要写入的客户端。'
+    : chosen ? '已选 ' + chosen + ' 个客户端；清单里 ' + state.models.length + ' 个模型会全部写入。'
+             : '勾选要写入的客户端。';
+}
+async function scan(quiet) {
+  try {
+    const rows = await api('/api/scan') || [];
+    state.rows = rows;
+    for (const r of rows) {
+      if (state.models.length && !state.pick[r.id]) state.pick[r.id] = defaultPick(r);
+    }
+    renderRows();
+    if (!quiet) log('扫描完成：本机 ' + rows.filter(r => r.installed).length + ' 个客户端在册');
+  } catch (e) { log('扫描失败：' + e.message, 'err'); }
+}
+
+/* ---------- 验证 ---------- */
+async function verify() {
+  if (state.busy) return;
+  const base = $('base').value.trim().replace(/\/+$/, '');
+  const key = $('key').value.trim();
+  if (!base || !key) { setStatus('err', '先填密钥和接口地址。'); return; }
+  state.busy = true;
+  $('btnVerify').disabled = true;
+  setStatus('busy', '正在验证并拉取模型清单…');
+  try {
+    const out = await api('/api/models?base=' + encodeURIComponent(base) + '&key=' + encodeURIComponent(key));
+    state.models = out.models || [];
+    state.rates = {};
+    for (const c of out.catalog || []) {
+      if (c && c.id && c.credits) state.rates[c.id] = c.credits;
+    }
+    for (const r of state.rows) state.pick[r.id] = defaultPick(r);
+    renderModels();
+    renderRows();
+    setStatus('ok', '已连接 · ' + state.models.length + ' 个模型将全部写入');
+    log('密钥验证通过，模型 ' + state.models.length + ' 个（写入时全量导入）', 'ok');
+    try {
+      await api('/api/settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base, key })
+      });
+      log('密钥已记住，下次打开自动填好');
+    } catch (e) { /* 记不住也不影响本次使用 */ }
+  } catch (e) {
+    state.models = [];
+    state.rates = {};
+    renderModels();
+    renderRows();
+    setStatus('err', '验证失败：' + e.message);
+    log('密钥验证失败：' + e.message, 'err');
+  } finally {
+    state.busy = false;
+    $('btnVerify').disabled = false;
+    updateApply();
+  }
+}
+function renderModels() {
+  const box = $('models');
+  box.innerHTML = '';
+  if (!state.models.length) {
+    box.innerHTML = '<span class="empty">验证后显示中转站开放的全部模型。</span>';
+    $('modelsCount').textContent = '';
+    return;
+  }
+  for (const m of state.models) {
+    const c = document.createElement('span');
+    c.className = 'chip';
+    const rate = state.rates[m];
+    if (rate) {
+      // 倍率整串塞进 title，chip 里只留短形式（"x0.80" / "≈58.1 积分/秒" 都能原样显示）
+      const label = document.createElement('span');
+      label.textContent = m;
+      const r = document.createElement('span');
+      r.className = 'rate';
+      r.textContent = rate;
+      c.append(label, r);
+      c.title = m + ' · 倍率 ' + rate;
+    } else {
+      c.textContent = m;
+      c.title = m + '（中转站没给倍率）';
+    }
+    box.appendChild(c);
+  }
+  $('modelsCount').textContent = state.models.length + ' 个 · 全部写入';
+}
+
+/* ---------- 写入 / 恢复 ---------- */
+async function apply() {
+  if (state.busy) return;
+  const items = [];
+  document.querySelectorAll('#rows input:checked').forEach(cb => {
+    const id = cb.closest('.row').dataset.id;
+    items.push({ id, model: state.pick[id] || state.models[0] });
+  });
+  if (!items.length) { log('没有勾选任何客户端', 'err'); return; }
+  const base = $('base').value.trim().replace(/\/+$/, '');
+  const key = $('key').value.trim();
+  state.busy = true;
+  updateApply();
+  log('开始写入 ' + items.length + ' 个客户端…');
+  try {
+    const out = await api('/api/apply', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base, key, models: state.models, rates: state.rates, items })
+    });
+    let ok = 0, bad = 0;
+    for (const it of items) {
+      const r = out[it.id];
+      if (r && r.ok) { ok++; log(it.id + '：已写入（备份 ' + r.backup + '）', 'ok'); }
+      else { bad++; log(it.id + '：写入失败 ' + (r ? r.error : '无响应'), 'err'); }
+    }
+    toast(bad ? '完成：' + ok + ' 成功，' + bad + ' 失败' : '已写入 ' + ok + ' 个客户端');
+    await scan(true);
+  } catch (e) {
+    log('写入失败：' + e.message, 'err');
+  } finally {
+    state.busy = false;
+    updateApply();
+  }
+}
+async function restore(row, mode) {
+  const after = mode !== 'before';
+  const yes = await ask(
+    after ? '恢复配置' : '撤销写入',
+    after
+      ? '把「' + row.name + '」的配置还原成本工具写入的样子' + (row.writtenAt ? '（' + row.writtenAt + '）' : '') + '？'
+      : '把「' + row.name + '」的配置回到本工具写入之前的状态（备份 ' + (row.backupAt || '') + '）？',
+    after ? '恢复' : '撤销'
+  );
+  if (!yes) return;
+  try {
+    const out = await api('/api/restore', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: row.id, mode: after ? 'after' : 'before' })
+    });
+    if (after) {
+      log(row.id + '：已恢复成本工具写入的配置（' + out.restored + '）', 'ok');
+    } else {
+      log(row.id + '：已撤销写入，回到备份 ' + out.restored + ' 之前的状态', 'ok');
+    }
+    await scan(true);
+  } catch (e) {
+    log(row.id + '：' + (after ? '恢复' : '撤销') + '失败 ' + e.message, 'err');
+  }
+}
+
+/* ---------- 悬停提示（自绘；WebView2 里原生 title 提示不弹，所以自己做） ---------- */
+const tip = $('tip');
+let tipEl = null;
+function hideTip() { tip.hidden = true; tipEl = null; }
+document.addEventListener('mouseover', e => {
+  const el = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+  if (!el) { if (tipEl) hideTip(); return; }
+  if (el === tipEl) return;
+  tipEl = el;
+  tip.textContent = el.dataset.tip || '';
+  tip.hidden = !tip.textContent;
+  if (tip.hidden) { tipEl = null; return; }
+  const r = tip.getBoundingClientRect();
+  tip.style.left = Math.max(8, Math.min(e.clientX + 16, window.innerWidth - r.width - 10)) + 'px';
+  tip.style.top = Math.max(8, Math.min(e.clientY + 18, window.innerHeight - r.height - 10)) + 'px';
+});
+document.addEventListener('mousedown', hideTip);
+document.addEventListener('wheel', hideTip, true);
+window.addEventListener('blur', hideTip);
+
+/* ---------- 事件绑定与启动 ---------- */
+// 宿主机心跳：Mac 版的界面在系统浏览器里，关了窗口要让后端进程自己退出。
+// （Windows 窗口模式没有副作用——那边关窗本来就退进程。）
+setInterval(() => { try { navigator.sendBeacon && navigator.sendBeacon('/api/ping'); } catch (e) {} }, 15000);
+window.addEventListener('pagehide', () => { try { navigator.sendBeacon && navigator.sendBeacon('/api/bye'); } catch (e) {} });
+$('btnVerify').onclick = verify;
+$('btnApply').onclick = apply;
+$('btnRescan').onclick = () => scan();
+$('key').addEventListener('keydown', e => { if (e.key === 'Enter') verify(); });
+$('btnEye').onclick = () => {
+  const k = $('key');
+  const show = k.type === 'password';
+  k.type = show ? 'text' : 'password';
+  $('btnEye').title = show ? '隐藏密钥' : '显示密钥';
+};
+
+(async function boot() {
+  // 主题：窗口模式由 Go 注入；浏览器里跟系统；?theme=light|dark 可强制预览
+  const forced = new URLSearchParams(location.search).get('theme');
+  const injected = window.__asterTheme;
+  if (forced === 'dark' || forced === 'light') {
+    document.documentElement.dataset.theme = forced;
+  } else if (injected === 'dark' || injected === 'light') {
+    document.documentElement.dataset.theme = injected;
+  } else if (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) {
+    document.documentElement.dataset.theme = 'dark';
+  }
+  try {
+    const mode = await api('/api/win/mode');
+    state.native = !!mode.window;
+    state.dark = document.documentElement.dataset.theme === 'dark';
+  } catch (e) { /* 网页模式兜底 */ }
+  if (state.native) initChrome();
+  await scan();
+  log('就绪。');
+  // 记住的密钥与地址：填好并自动验证一次，免得每次重输
+  try {
+    const s = await api('/api/settings');
+    if (s.base) $('base').value = s.base;
+    if (s.key) {
+      $('key').value = s.key;
+      log('已载入上次的密钥，自动验证中…');
+      verify();
+    }
+  } catch (e) { /* 首次运行还没有设置 */ }
+})();
+</script>
+</body>
+</html>

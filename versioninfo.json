@@ -1,0 +1,43 @@
+{
+	"IconPath": "app.ico",
+	"ManifestPath": "app.manifest",
+	"FixedFileInfo": {
+		"FileVersion": {
+			"Major": 1,
+			"Minor": 0,
+			"Patch": 0,
+			"Build": 0
+		},
+		"ProductVersion": {
+			"Major": 1,
+			"Minor": 0,
+			"Patch": 0,
+			"Build": 0
+		},
+		"FileFlagsMask": "3f",
+		"FileFlags ": "00",
+		"FileOS": "040004",
+		"FileType": "01",
+		"FileSubType": "00"
+	},
+	"StringFileInfo": {
+		"Comments": "本机离线运行，不联网、不上传任何数据。",
+		"CompanyName": "Aster",
+		"FileDescription": "Aster 接入助手 - 中转站客户端配置工具",
+		"FileVersion": "1.0.0.0",
+		"InternalName": "AsterOnboard",
+		"LegalCopyright": "",
+		"LegalTrademarks": "",
+		"OriginalFilename": "aster-onboard.exe",
+		"PrivateBuild": "",
+		"ProductName": "Aster 接入助手",
+		"ProductVersion": "1.0.0.0",
+		"SpecialBuild": ""
+	},
+	"VarFileInfo": {
+		"Translation": {
+			"LangID": "0804",
+			"CharsetID": "04B0"
+		}
+	}
+}

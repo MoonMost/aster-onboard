@@ -1,0 +1,13 @@
+# build output
+/dist/
+*.exe
+*.exe~
+*.app
+
+# intermediate resource object (build.cmd regenerates it)
+resource.syso
+
+# editor / OS noise
+.DS_Store
+Thumbs.db
+*.swp

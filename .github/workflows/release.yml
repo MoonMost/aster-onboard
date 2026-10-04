@@ -1,0 +1,111 @@
+# Build, sign (via SignPath Foundation) and publish a release.
+#
+# The Windows executable is built first, then handed to SignPath, which signs
+# it with the project's certificate -- the private key lives in SignPath's HSM
+# and never reaches this runner -- and returns the signed binary.
+#
+# Signing is skipped while the credentials below are missing, so the workflow
+# still produces a usable (unsigned) release before the SignPath Foundation
+# application is approved. One-time setup once approved:
+#   * repository secrets:   SIGNPATH_API_TOKEN, SIGNPATH_ORGANIZATION_ID
+#   * repository variables: SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build windows/amd64
+    runs-on: windows-latest
+    env:
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+      SIGNPATH_ORGANIZATION_ID: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The .syso is committed, but regenerate it so the shipped binary always
+      # carries the icon/manifest/version info from the current sources.
+      - name: Regenerate Windows resources
+        shell: pwsh
+        run: |
+          go run github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest versioninfo.json
+          Move-Item -Force resource.syso rsrc_windows_amd64.syso
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        env:
+          GOOS: windows
+          GOARCH: amd64
+        run: go build -p 2 -trimpath -ldflags "-H=windowsgui -s -w" -o aster-onboard.exe .
+
+      - name: Upload unsigned artifact
+        id: upload-unsigned
+        uses: actions/upload-artifact@v4
+        with:
+          name: aster-onboard-unsigned
+          path: aster-onboard.exe
+
+      - name: Sign via SignPath
+        id: sign
+        if: env.SIGNPATH_API_TOKEN != '' && env.SIGNPATH_ORGANIZATION_ID != ''
+        uses: SignPath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+
+      # Collect whatever we ended up with into release/ and hash it.
+      - name: Collect artifact + checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          if ("${{ steps.sign.outcome }}" -eq "success") {
+            $exe = Get-ChildItem signed -Recurse -Filter *.exe | Select-Object -First 1
+            if (-not $exe) { throw "signing succeeded but no signed exe was found in ./signed" }
+            Copy-Item $exe.FullName release/aster-onboard.exe
+            Write-Host "release artifact: SIGNED build"
+          } else {
+            Copy-Item aster-onboard.exe release/aster-onboard.exe
+            Write-Host "release artifact: unsigned build (SignPath not configured)"
+          }
+          $h = (Get-FileHash release/aster-onboard.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  aster-onboard.exe" | Out-File -Encoding ascii release/aster-onboard.exe.sha256
+          Get-Content release/aster-onboard.exe.sha256
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aster-onboard-release
+          path: release/
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag release/aster-onboard.exe release/aster-onboard.exe.sha256 --clobber
+          } else {
+            gh release create $tag --title $tag --generate-notes release/aster-onboard.exe release/aster-onboard.exe.sha256
+          }
