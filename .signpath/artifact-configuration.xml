@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration for the GitHub Actions release workflow.
+
+  The action uploads the build as a GitHub Actions artifact, i.e. a ZIP that
+  contains aster-onboard.exe, so the PE file is nested inside <zip-file>.
+
+  Register this in the SignPath portal (Projects -> Artifact configurations)
+  once the Foundation application is approved; the slug you give it there goes
+  into the SIGNPATH_ARTIFACT_CONFIGURATION_SLUG repository variable used by
+  .github/workflows/release.yml.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="aster-onboard.exe">
+      <authenticode-sign/>
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

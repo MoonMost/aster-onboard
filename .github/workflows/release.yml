@@ -8,7 +8,9 @@
 # still produces a usable (unsigned) release before the SignPath Foundation
 # application is approved. One-time setup once approved:
 #   * repository secrets:   SIGNPATH_API_TOKEN, SIGNPATH_ORGANIZATION_ID
-#   * repository variables: SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG
+#   * repository variables: SIGNPATH_PROJECT_SLUG, SIGNPATH_SIGNING_POLICY_SLUG,
+#                           SIGNPATH_ARTIFACT_CONFIGURATION_SLUG
+#     (the artifact configuration itself is in .signpath/artifact-configuration.xml)
 
 name: release
 
@@ -68,6 +70,7 @@ jobs:
           organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
           project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
           signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_ARTIFACT_CONFIGURATION_SLUG }}
           github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
           wait-for-completion: true
           output-artifact-directory: signed
