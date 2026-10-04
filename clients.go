@@ -26,13 +26,58 @@ type Params struct {
 	Key    string   // 朋友的中转站密钥
 	Model  string   // 该客户端的默认模型
 	Models []string // 中转站 /v1/models 拉回来的全量 id
-	// Rates 是 模型 id → 中转站 /v1/models 的 credits 文案（如 "x0.80"）。
-	// 认这个字段的客户端（WorkBuddy）拿它当消耗倍率直接显示；没有的条目客户端就不显示。
+	// Catalog 是中转站 /v1/models 的完整条目（倍率 + 思考档位 + 媒体能力 + 上下文）。
+	// 各客户端的模型覆盖层（ZCode 的 optionSpecs/inputFormat、WorkBuddy 的 reasoning）
+	// 全部由它派生：站点声明什么就写什么，引擎没报的字段不编造。
+	Catalog []catalogItem
+	// Rates 是旧版页面回传的 模型 id → credits 文案；Catalog 里没有的条目才回退读它。
 	Rates map[string]string
 }
 
-// rateOf 返回某个模型的中转站倍率文案；没下发的返回空串（调用方据此省略字段）。
+// itemOf 按 id 找目录条目。
+func (p Params) itemOf(model string) (catalogItem, bool) {
+	for _, m := range p.Catalog {
+		if m.ID == model {
+			return m, true
+		}
+	}
+	return catalogItem{}, false
+}
+
+// rateOf 返回某个模型的旧口径倍率（站点 credits 原文）；没下发的返回空串。
 func (p Params) rateOf(model string) string {
+	if m, ok := p.itemOf(model); ok && strings.TrimSpace(m.Credits) != "" {
+		return strings.TrimSpace(m.Credits)
+	}
+	return strings.TrimSpace(p.Rates[model])
+}
+
+// rateHint 是写进客户端「消耗速度/倍率」那一格的文案——**必须与官网模型清单那一格同值**。
+// 口径与门户导出逐字一致（portal.html 的 clientRateHint / workbuddyMediaEntry）：
+//
+//	聊天行：landing_rate + " 积分/千token"（客户端只取第一个数字画成 "Nx"）
+//	媒体行：credits 原文（"≈83 积分/秒"）；只有 landing_rate 时按同一形状拼
+//
+// landing_rate 缺了退回 credits，都没有再退回旧页面回传的 rates，至少不把这一格弄丢。
+func (p Params) rateHint(model string) string {
+	item, ok := p.itemOf(model)
+	if ok {
+		if item.IsMedia() {
+			if s := strings.TrimSpace(item.Credits); s != "" {
+				return s
+			}
+			if s := strings.TrimSpace(item.LandingRate); s != "" {
+				return "≈" + s + " 积分/秒"
+			}
+		} else {
+			if s := strings.TrimSpace(item.LandingRate); s != "" {
+				return s + " 积分/千token"
+			}
+			if s := strings.TrimSpace(item.Credits); s != "" {
+				return s
+			}
+		}
+	}
 	return strings.TrimSpace(p.Rates[model])
 }
 

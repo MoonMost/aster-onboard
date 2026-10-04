@@ -32,6 +32,31 @@ default model is matched by name in the background.
 | Desktop | Claude Desktop · ZCode · WorkBuddy |
 | CLI | Claude Code · Codex · OpenCode · OpenClaw · Hermes Agent · Kimi Code · Grok Build · Antigravity CLI |
 
+### What gets written per model
+
+Clients that support per-model metadata get the endpoint's own model
+attributes — context window, input/output limits, modalities, reasoning
+efforts and the rate hint — written into their native fields. Nothing is
+invented: a field the endpoint does not report is simply not written.
+
+| Column (from `GET /v1/models`) | ZCode | WorkBuddy | Codex | OpenCode | OpenClaw | Kimi / Grok |
+| --- | --- | --- | --- | --- | --- | --- |
+| rate hint (`landing_rate`) | — | `credits` | — | — | — | — |
+| context (`context_length`) | `properties.contextWindow` | `contextLength` | `context_window` | `limit.context` | `contextWindow` | `max_context_size` / `context_window` |
+| input cap (`max_allowed_size`) | — | `maxInputTokens`, `maxAllowedSize` | — | `limit.input` | — | — |
+| output cap (`max_output_tokens`) | `optionSpecs.maxOutputTokens.max` | `maxOutputTokens` | — | `limit.output` | `maxTokens` | — |
+| images / video | `inputFormat` | `supportsImages` / `supportsVideos` | `input_modalities` | `modalities.input` | `input` | — |
+| reasoning efforts (`reasoning_*`) | `optionSpecs.reasoningLevel.values` | `supportsReasoning` + `reasoning{…}` | `supported_reasoning_levels` | `reasoning` (bool) | `reasoning` (bool) | — |
+
+ZCode uses the OpenAI wire protocol (`baseUrl = <origin>/v1`) on purpose: its
+reasoning levels are only transmitted as `reasoning_effort` on that path.
+
+Codex note: every entry in `aster-model-catalog.json` must carry Codex's full
+required field set (`supported_reasoning_levels` — an empty array is fine —
+`shell_type`, `visibility`, `supported_in_api`, `priority`, `support_verbosity`,
+`truncation_policy`, `experimental_supported_tools`, `base_instructions`, …).
+A single missing field makes Codex refuse to load the whole config.
+
 ## Privacy
 
 - The tool talks **only** to the endpoint you type in. There is no telemetry,

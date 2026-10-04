@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -227,12 +228,88 @@ func buildCodex(home string, p Params) (map[string]string, error) {
 	}, nil
 }
 
+// catalogEntries 组 Codex 的 model_catalog.json。**字段不是可选的**：Codex 解析这份文件时
+// 少一个字段就整份配置加载失败（2026-10-04 用 codex 0.150 的 `features list` 逐个报错试出来的
+// 必填集：supported_reasoning_levels / shell_type / visibility / supported_in_api / priority /
+// support_verbosity / truncation_policy / experimental_supported_tools，外加
+// base_instructions 或 model_messages.instructions_template 二选一）——只写 slug+display_name
+// 会让 Codex 连启动都起不来，这就是当时「给 Codex 导入了配置就再也打不开」的根因。
 func catalogEntries(p Params) []any {
 	var out []any
 	for _, m := range orderedModels(p) {
-		out = append(out, map[string]any{"slug": m, "display_name": m})
+		entry := map[string]any{
+			"slug":         m,
+			"display_name": m,
+			"shell_type":   "unified_exec",
+			// visibility 取值 list/hide/none：list = 出现在模型选择器里（参考实现同样把
+			// fallback 的 none 改成 list，否则自定义模型在客户端里看不到）。
+			"visibility":                   "list",
+			"supported_in_api":             true,
+			"support_verbosity":            false,
+			"supports_parallel_tool_calls": false,
+			"priority":                     99,
+			"truncation_policy":            map[string]any{"mode": "bytes", "limit": 10000},
+			"experimental_supported_tools": []any{},
+			"default_reasoning_summary":    "auto",
+			"base_instructions":            codexBaseInstructions,
+		}
+		if item, ok := p.itemOf(m); ok {
+			// 上下文/最大上下文：Codex 拿它算上下文预算与自动压缩阈值。
+			if v := intOf(item.ContextLength); v > 0 {
+				entry["context_window"] = v
+				entry["max_context_window"] = v
+			}
+			// 输入模态：Codex 只认 text/image。
+			entry["input_modalities"] = codexModalities(item)
+			// 思考档位清单与默认档：Codex 的 /model 选择器据此列档（未知档位会被丢掉）。
+			// 这个字段**每条都必须有**（站点没报档位就给空数组）——缺字段会让整份配置加载失败。
+			entry["supported_reasoning_levels"] = codexReasoningLevels(item.ReasoningEfforts)
+			if e := item.DefaultEffortOf(); e != "" && codexLevelAllowed(e) {
+				entry["default_reasoning_level"] = e
+			}
+		} else {
+			entry["input_modalities"] = []any{"text"}
+			entry["supported_reasoning_levels"] = []any{}
+		}
+		out = append(out, entry)
 	}
 	return out
+}
+
+// codexBaseInstructions：Codex 目录条目的必填指令串（缺了 base_instructions 与
+// model_messages.instructions_template 会让整份配置加载失败）。这里给一句中性的编码代理
+// 说明，不照搬 Codex 自带的长提示词。
+const codexBaseInstructions = "You are a coding agent. Be precise, safe, and helpful. " +
+	"Follow the user's instructions and use the tools available to you."
+
+// codexModalities：Codex 只认 text/image 两种输入模态。
+func codexModalities(item catalogItem) []any {
+	out := []any{"text"}
+	if item.SupportsImages != nil && *item.SupportsImages {
+		out = append(out, "image")
+	}
+	return out
+}
+
+// codexReasoningLevels：Codex 允许的档位集合（与 EasyCLIProxyAPI 的 is_allowed_reasoning_level
+// 同表）；站点报的档位先过滤未知值，再转成带说明的对象数组（Codex 两种写法都收）。
+func codexReasoningLevels(efforts []string) []any {
+	out := []any{} // 必须是数组：nil 会序列化成 null，Codex 直接拒收整份配置
+	for _, e := range efforts {
+		if !codexLevelAllowed(e) {
+			continue
+		}
+		out = append(out, map[string]any{"effort": e, "description": e + " reasoning effort"})
+	}
+	return out
+}
+
+func codexLevelAllowed(level string) bool {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra":
+		return true
+	}
+	return false
 }
 
 // ---------- OpenCode：opencode.json(c) ----------
@@ -255,11 +332,53 @@ func buildOpenCode(home string, p Params) (map[string]string, error) {
 	options["apiKey"] = p.Key
 	models := map[string]any{}
 	for _, m := range orderedModels(p) {
-		models[m] = map[string]any{"name": m}
+		models[m] = opencodeModelEntry(p, m)
 	}
 	provider["models"] = models
 	root["model"] = providerID + "/" + p.Model
 	return map[string]string{path: withLeadingComments(existing, renderJSON(root))}, nil
+}
+
+// opencodeModelEntry：OpenCode 的模型条目字段（schema 见 opencode.ai/config.json）——
+// limit{context,input,output}、modalities.input、reasoning、attachment、tool_call。
+// limit 里 context 与 output 都是必填，所以两个都拿到了才写 limit，缺一个就整块不写。
+func opencodeModelEntry(p Params, model string) map[string]any {
+	entry := map[string]any{"name": model}
+	item, ok := p.itemOf(model)
+	if !ok {
+		return entry
+	}
+	ctx, out := intOf(item.ContextLength), intOf(item.MaxOutputTokens)
+	if ctx > 0 && out > 0 {
+		limit := map[string]any{"context": ctx, "output": out}
+		if v := intOf(item.MaxAllowedSize); v > 0 {
+			limit["input"] = v
+		}
+		entry["limit"] = limit
+	}
+	entry["modalities"] = map[string]any{"input": opencodeModalities(item), "output": []any{"text"}}
+	if item.SupportsReasoning != nil {
+		entry["reasoning"] = *item.SupportsReasoning
+	}
+	if item.SupportsImages != nil && *item.SupportsImages {
+		entry["attachment"] = true
+	}
+	if item.SupportsToolCall != nil {
+		entry["tool_call"] = *item.SupportsToolCall
+	}
+	return entry
+}
+
+// opencodeModalities：OpenCode 的输入模态取值 text/audio/image/video/pdf。
+func opencodeModalities(item catalogItem) []any {
+	out := []any{"text"}
+	if item.SupportsImages != nil && *item.SupportsImages {
+		out = append(out, "image")
+	}
+	if item.SupportsVideo != nil && *item.SupportsVideo {
+		out = append(out, "video")
+	}
+	return out
 }
 
 func withLeadingComments(existing, rendered string) string {
@@ -290,7 +409,7 @@ func buildOpenClaw(home string, p Params) (map[string]string, error) {
 	managed["api"] = "openai-completions"
 	var list []any
 	for _, m := range orderedModels(p) {
-		list = append(list, map[string]any{"id": m, "name": m})
+		list = append(list, openclawModelEntry(p, m))
 	}
 	managed["models"] = list
 
@@ -307,6 +426,32 @@ func buildOpenClaw(home string, p Params) (map[string]string, error) {
 		catalog[providerID+"/"+m] = map[string]any{}
 	}
 	return map[string]string{path: withLeadingComments(existing, renderJSON(root))}, nil
+}
+
+// openclawModelEntry：OpenClaw 的模型条目字段（见 docs.openclaw.ai 自定义 provider）——
+// contextWindow（原生上下文）、maxTokens（输出上限）、input（模态数组）、reasoning。
+func openclawModelEntry(p Params, model string) map[string]any {
+	entry := map[string]any{"id": model, "name": model}
+	item, ok := p.itemOf(model)
+	if !ok {
+		return entry
+	}
+	if v := intOf(item.ContextLength); v > 0 {
+		entry["contextWindow"] = v
+	}
+	if v := intOf(item.MaxOutputTokens); v > 0 {
+		entry["maxTokens"] = v
+	}
+	// 输入模态：OpenClaw 文档只写了 text / image（与 OpenCode 的枚举不同，video 未验证⇒不写）。
+	in := []any{"text"}
+	if item.SupportsImages != nil && *item.SupportsImages {
+		in = append(in, "image")
+	}
+	entry["input"] = in
+	if item.SupportsReasoning != nil {
+		entry["reasoning"] = *item.SupportsReasoning
+	}
+	return entry
 }
 
 // ---------- Hermes：config.yaml（yaml.Node 往返，注释保留） ----------
@@ -456,9 +601,14 @@ func buildZCode(home string, p Params) (map[string]string, error) {
 				"type":   "api-key",
 				"apiKey": p.Key,
 			},
+			// 走 OpenAI 协议（站里所有引擎的原生形状；zcode-sync 给自建 provider 也是这一条）。
+			// 不用 anthropic-messages 的原因：那条路的档位是 output_config.effort，而本站
+			// /v1/messages 翻译层按红线丢弃 thinking、也不认 output_config ⇒ 档位会变成摆设。
+			// OpenAI 路上档位映射成 reasoning_effort + thinking.type（ZCode 内置 api 规则），
+			// 正是网关会归一化并透传给引擎的字段。
 			"api": map[string]any{
-				"type":    "anthropic-messages",
-				"baseUrl": p.Base,
+				"type":    "openai-chat-completions",
+				"baseUrl": p.openaiBase(),
 			},
 			"personalModelIds": toAnySlice(names),
 			"modelOrder":       toAnySlice(names),
@@ -495,7 +645,77 @@ func buildZCode(home string, p Params) (map[string]string, error) {
 		"providerId": providerID,
 		"modelId":    p.Model,
 	}
+	applyZCodeModelRules(config, p)
 	return map[string]string{path: renderJSON(root)}, nil
+}
+
+// applyZCodeModelRules 往 ZCode 的**每模型覆盖层** modelConfigRules.providerModelRules
+// 写三个键（与 tools/zcode-sync 的 applyModelRulesLayer 同一口径，两个入口都同步时不会互相打架）：
+//
+//	properties.inputFormat          —— 输入类型。ZCode 自带一张按模型名正则猜能力的内置表，
+//	                                   我们这些自定义名（Space-Bunny 之类）撞不上任何正则，
+//	                                   会退回「只有文本 / 思考两档 / 上下文 20 万」的兜底条款。
+//	properties.contextWindow        —— 上下文窗口（引擎报多少写多少，真让客户端读到 1M）。
+//	optionSpecs.reasoningLevel      —— 思考档位下拉的**唯一数据源**；不写就只有「开启/关闭」，
+//	                                   写了才有 低/中/高/超高/极致 五档可选。
+//
+// 只动这三个键，enabled 与其余属性（webSearch / jsonSchema / 手设项）一律不碰。
+func applyZCodeModelRules(config map[string]any, p Params) {
+	mcr := ensureObject(config, "modelConfigRules")
+	rules, _ := mcr["providerModelRules"].([]any)
+	for _, name := range orderedModels(p) {
+		item, ok := p.itemOf(name)
+		if !ok {
+			continue
+		}
+		var rule map[string]any
+		for _, r := range rules {
+			m, _ := r.(map[string]any)
+			if m != nil && m["providerId"] == providerID && m["modelId"] == name {
+				rule = m
+				break
+			}
+		}
+		if rule == nil {
+			rule = map[string]any{"providerId": providerID, "modelId": name}
+			rules = append(rules, rule)
+		}
+		c := ensureObject(rule, "config")
+		props := ensureObject(c, "properties")
+		props["inputFormat"] = map[string]any{
+			"supportsText":  true,
+			"supportsImage": item.SupportsImages != nil && *item.SupportsImages,
+			"supportsVideo": item.SupportsVideo != nil && *item.SupportsVideo,
+			"supportsAudio": false,
+			"supportsPdf":   false,
+		}
+		if item.ContextLength != nil && *item.ContextLength > 0 {
+			props["contextWindow"] = *item.ContextLength
+		} else {
+			delete(props, "contextWindow")
+		}
+		// 档位：引擎声明了几档就写几档；声明了思考但没给清单的按 sync 脚本口径给 ["high"]；
+		// 完全不是思考模型给 ["none"]（客户端要一个非空数组，空数组会被校验拒掉）。
+		// 不擅自加 "disabled"——「仅思考」的模型关不掉思考，加一档等于对客户端谎报能关。
+		levels := item.ReasoningEfforts
+		if len(levels) == 0 {
+			if item.SupportsReasoning != nil && *item.SupportsReasoning {
+				levels = []string{"high"}
+			} else {
+				levels = []string{"none"}
+			}
+		}
+		specs := ensureObject(c, "optionSpecs")
+		specs["reasoningLevel"] = map[string]any{"values": toAnySlice(levels)}
+		// 输出上限（官网「输出上限」那一列）：客户端据此知道这个模型最多能吐多少 token，
+		// 内置 api 规则会把它映射成 max_completion_tokens。站点没报就不写。
+		if v := intOf(item.MaxOutputTokens); v > 0 {
+			specs["maxOutputTokens"] = map[string]any{"max": v}
+		} else {
+			delete(specs, "maxOutputTokens")
+		}
+	}
+	mcr["providerModelRules"] = rules
 }
 
 func toAnySlice(in []string) []any {
@@ -592,13 +812,109 @@ func fillWorkBuddyModel(entry map[string]any, p Params, model string) {
 	entry["supportsToolCall"] = true
 	entry["disabled"] = false
 	entry["useCustomProtocol"] = false
-	// WorkBuddy 的模型选择器读 credits 当消耗倍率显示（列表行右侧、子菜单的「消耗速度」）。
-	// 站点没下发倍率的模型就删掉旧值，免得把上一次写的倍率留在配置里。
-	if credits := p.rateOf(model); credits != "" {
-		entry["credits"] = credits
+	// 倍率提示与官网那一格同值（见 Params.rateHint）。站点没下发就删掉旧值，
+	// 免得把上一次写的倍率留在配置里。
+	if hint := p.rateHint(model); hint != "" {
+		entry["credits"] = hint
 	} else {
 		delete(entry, "credits")
 	}
+	fillWorkBuddyCapabilities(entry, p, model)
+}
+
+// fillWorkBuddyCapabilities 写「思考档位 / 媒体输入 / 规格」——形状对齐门户「完整配置导出」
+// 的 buildWorkbuddyExport（那是给朋友手贴的同一份东西），也就是客户端设置页那个
+// 「自定义模型」编辑器保存时写的字段超集：
+//
+//	supportsReasoning + onlyReasoning + reasoning{defaultEffort, supportedEfforts, canDisableThinking}
+//	supportsImages / supportsVideos
+//	maxInputTokens(输入上限=max_allowed_size) / maxAllowedSize / maxOutputTokens / contextLength(上下文)
+//
+// 缺了能力位，输入框的模型子菜单里就没有「思考强度」一节（isReasoningConfigurable 要求
+// supportsReasoning 为真、且要么有 supportedEfforts、要么允许开关），档位自然选不了；
+// 缺了 maxInputTokens，客户端也不知道能塞多长的上下文。站点没报的字段一律删掉，不编造能力。
+func fillWorkBuddyCapabilities(entry map[string]any, p Params, model string) {
+	item, ok := p.itemOf(model)
+	if !ok {
+		return
+	}
+	if item.SupportsReasoning != nil && *item.SupportsReasoning {
+		entry["supportsReasoning"] = true
+		only := item.OnlyReasoning != nil && *item.OnlyReasoning
+		if only {
+			entry["onlyReasoning"] = true
+		} else {
+			delete(entry, "onlyReasoning")
+		}
+		reasoning := map[string]any{}
+		if e := item.DefaultEffortOf(); e != "" {
+			reasoning["defaultEffort"] = e
+		}
+		if len(item.ReasoningEfforts) > 0 {
+			reasoning["supportedEfforts"] = toAnySlice(item.ReasoningEfforts)
+		}
+		if only {
+			// 「仅思考」的模型关不掉思考——只有 false 时才是显式声明，缺省即允许关闭。
+			reasoning["canDisableThinking"] = false
+		}
+		if len(reasoning) > 0 {
+			entry["reasoning"] = reasoning
+		} else {
+			delete(entry, "reasoning")
+		}
+	} else {
+		delete(entry, "supportsReasoning")
+		delete(entry, "onlyReasoning")
+		delete(entry, "reasoning")
+	}
+	setBoolField(entry, "supportsImages", item.SupportsImages)
+	setBoolField(entry, "supportsVideos", item.SupportsVideo)
+	// 输入上限（max_allowed_size）是客户端真正拿来卡"一次能塞多长"的数；站点没报才退回上下文。
+	if v := firstInt(item.MaxAllowedSize, item.ContextLength); v > 0 {
+		entry["maxInputTokens"] = v
+	} else {
+		delete(entry, "maxInputTokens")
+	}
+	if v := intOf(item.MaxAllowedSize); v > 0 {
+		entry["maxAllowedSize"] = v
+	} else {
+		delete(entry, "maxAllowedSize")
+	}
+	if v := intOf(item.MaxOutputTokens); v > 0 {
+		entry["maxOutputTokens"] = v
+	} else {
+		delete(entry, "maxOutputTokens")
+	}
+	// contextLength 与门户导出同形（客户端当前不读它，留着不碍事，口径对齐在先）。
+	if v := intOf(item.ContextLength); v > 0 {
+		entry["contextLength"] = v
+	} else {
+		delete(entry, "contextLength")
+	}
+}
+
+func setBoolField(entry map[string]any, key string, v *bool) {
+	if v != nil {
+		entry[key] = *v
+	} else {
+		delete(entry, key)
+	}
+}
+
+func intOf(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
+}
+
+func firstInt(vs ...*int64) int64 {
+	for _, v := range vs {
+		if v != nil && *v > 0 {
+			return *v
+		}
+	}
+	return 0
 }
 
 // ---------- Kimi Code：config.toml ----------
@@ -620,11 +936,22 @@ func buildKimi(home string, p Params) (map[string]string, error) {
 			{"provider", tomlQuote(providerID)},
 			{"model", tomlQuote(m)},
 			{"display_name", tomlQuote(m)},
-			{"max_context_size", "200000"},
+			// 上下文上限取站点「上下文」列；站点没报才退回 20 万（Kimi Code 要一个正数）。
+			{"max_context_size", strconv.FormatInt(kimiContext(p, m), 10)},
 			{"capabilities", `["tool_use"]`},
 		})
 	}
 	return map[string]string{path: src}, nil
+}
+
+// kimiContext：Kimi Code 的 max_context_size。站点报上下文就用真值，没报退回 200000。
+func kimiContext(p Params, model string) int64 {
+	if item, ok := p.itemOf(model); ok {
+		if v := intOf(item.ContextLength); v > 0 {
+			return v
+		}
+	}
+	return 200000
 }
 
 // ---------- Grok Build：config.toml ----------
@@ -645,7 +972,8 @@ func buildGrok(home string, p Params) (map[string]string, error) {
 			{"name", tomlQuote(m)},
 			{"api_key", tomlQuote(p.Key)},
 			{"api_backend", tomlQuote("chat_completions")},
-			{"context_window", "200000"},
+			// 上下文上限取站点「上下文」列；站点没报才退回 20 万。
+			{"context_window", strconv.FormatInt(kimiContext(p, m), 10)},
 		})
 	}
 	return map[string]string{path: src}, nil

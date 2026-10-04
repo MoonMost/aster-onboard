@@ -61,12 +61,44 @@ func handleScan(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, rows)
 }
 
-// catalogItem 是中转站 /v1/models 的一条：id 必带，credits 是站点下发的消耗倍率
-// （形如 "x0.80" / "≈58.1 积分/秒"）。倍率原样透传给客户端，不在这里做换算——
-// 站点口径是「实际服务那家的倍率」，客户端只负责把它显示出来。
+// catalogItem 是中转站 /v1/models 的一条：id 必带，其余字段就是**官网模型清单那一行**
+// （模型/倍率/上下文/输入上限/输出上限/支持图片/支持视频/思考档位/仅思考/默认档位）。
+// 全部原样透传给客户端，不在这里做换算——客户端只负责把它们显示/校验出来。
 type catalogItem struct {
-	ID      string `json:"id"`
-	Credits string `json:"credits,omitempty"`
+	ID                string          `json:"id"`
+	Credits           string          `json:"credits,omitempty"`
+	LandingRate       string          `json:"landing_rate,omitempty"`
+	Type              string          `json:"type,omitempty"`
+	SupportsToolCall  *bool           `json:"supports_tool_call,omitempty"`
+	SupportsReasoning *bool           `json:"supports_reasoning,omitempty"`
+	OnlyReasoning     *bool           `json:"only_reasoning,omitempty"`
+	ReasoningEfforts  []string        `json:"reasoning_supported_efforts,omitempty"`
+	DefaultEffort     string          `json:"reasoning_default_effort,omitempty"`
+	SupportsImages    *bool           `json:"supports_images,omitempty"`
+	SupportsVideo     *bool           `json:"supports_video,omitempty"`
+	ContextLength     *int64          `json:"context_length,omitempty"`
+	MaxAllowedSize    *int64          `json:"max_allowed_size,omitempty"`
+	MaxOutputTokens   *int64          `json:"max_output_tokens,omitempty"`
+	VideoSpecs        json.RawMessage `json:"video_specs,omitempty"`
+}
+
+// IsMedia：官网把 type=image|video 的行算媒体行（按秒/按张计价，没有 token 规格）。
+// 判据只认 type，不按名字猜——与官网表格、门户导出同一条线（landingIsMedia/isMediaRow）。
+func (m catalogItem) IsMedia() bool {
+	t := strings.ToLower(strings.TrimSpace(m.Type))
+	return t == "video" || t == "image"
+}
+
+// DefaultEffortOf：默认档位。站点没报就退回档位清单的最后一档（门户导出的兜底同口径），
+// 再没有就是空串。
+func (m catalogItem) DefaultEffortOf() string {
+	if s := strings.TrimSpace(m.DefaultEffort); s != "" {
+		return s
+	}
+	if n := len(m.ReasoningEfforts); n > 0 {
+		return m.ReasoningEfforts[n-1]
+	}
+	return ""
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -106,8 +138,21 @@ func fetchModels(base, key string) ([]catalogItem, error) {
 	}
 	var payload struct {
 		Data []struct {
-			ID      string `json:"id"`
-			Credits string `json:"credits"`
+			ID                string          `json:"id"`
+			Credits           string          `json:"credits"`
+			LandingRate       string          `json:"landing_rate"`
+			Type              string          `json:"type"`
+			SupportsToolCall  *bool           `json:"supports_tool_call"`
+			SupportsReasoning *bool           `json:"supports_reasoning"`
+			OnlyReasoning     *bool           `json:"only_reasoning"`
+			ReasoningEfforts  []string        `json:"reasoning_supported_efforts"`
+			DefaultEffort     string          `json:"reasoning_default_effort"`
+			SupportsImages    *bool           `json:"supports_images"`
+			SupportsVideo     *bool           `json:"supports_video"`
+			ContextLength     *int64          `json:"context_length"`
+			MaxAllowedSize    *int64          `json:"max_allowed_size"`
+			MaxOutputTokens   *int64          `json:"max_output_tokens"`
+			VideoSpecs        json.RawMessage `json:"video_specs"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -116,7 +161,23 @@ func fetchModels(base, key string) ([]catalogItem, error) {
 	var out []catalogItem
 	for _, d := range payload.Data {
 		if d.ID != "" {
-			out = append(out, catalogItem{ID: d.ID, Credits: strings.TrimSpace(d.Credits)})
+			out = append(out, catalogItem{
+				ID:                d.ID,
+				Credits:           strings.TrimSpace(d.Credits),
+				LandingRate:       strings.TrimSpace(d.LandingRate),
+				Type:              strings.TrimSpace(d.Type),
+				SupportsToolCall:  d.SupportsToolCall,
+				SupportsReasoning: d.SupportsReasoning,
+				OnlyReasoning:     d.OnlyReasoning,
+				ReasoningEfforts:  d.ReasoningEfforts,
+				DefaultEffort:     strings.TrimSpace(d.DefaultEffort),
+				SupportsImages:    d.SupportsImages,
+				SupportsVideo:     d.SupportsVideo,
+				ContextLength:     d.ContextLength,
+				MaxAllowedSize:    d.MaxAllowedSize,
+				MaxOutputTokens:   d.MaxOutputTokens,
+				VideoSpecs:        d.VideoSpecs,
+			})
 		}
 	}
 	if len(out) == 0 {
@@ -139,8 +200,10 @@ type applyRequest struct {
 	Base   string   `json:"base"`
 	Key    string   `json:"key"`
 	Models []string `json:"models"`
-	// Rates 是 模型 id → 中转站下发的倍率文案（/v1/models 的 credits），
-	// 原样写进客户端配置，不在本工具里换算。
+	// Catalog 是 /api/models 回给页面的完整条目（能力 + 倍率），页面原样回传。
+	// 认它的客户端（ZCode / WorkBuddy）拿它写模型覆盖层；缺了就只有 id 与倍率。
+	Catalog []catalogItem `json:"catalog"`
+	// Rates 是旧版页面回传的 模型 id → 倍率文案，Catalog 缺席时的回退。
 	Rates map[string]string `json:"rates"`
 	Items []struct {
 		ID    string `json:"id"`
@@ -170,7 +233,7 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 			results[item.ID] = map[string]any{"ok": false, "error": "未知客户端"}
 			continue
 		}
-		backupID, err := applyClient(c, Params{Base: req.Base, Key: req.Key, Model: item.Model, Models: req.Models, Rates: req.Rates})
+		backupID, err := applyClient(c, Params{Base: req.Base, Key: req.Key, Model: item.Model, Models: req.Models, Catalog: req.Catalog, Rates: req.Rates})
 		if err != nil {
 			results[item.ID] = map[string]any{"ok": false, "error": err.Error()}
 			continue

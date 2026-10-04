@@ -425,7 +425,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const state = { models: [], rates: {}, rows: [], pick: {}, busy: false, native: false, dark: false };
+const state = { models: [], catalog: [], rates: {}, rows: [], pick: {}, busy: false, native: false, dark: false };
 
 /* ---------- 小工具 ---------- */
 async function api(path, opts) {
@@ -700,8 +700,9 @@ async function verify() {
   try {
     const out = await api('/api/models?base=' + encodeURIComponent(base) + '&key=' + encodeURIComponent(key));
     state.models = out.models || [];
+    state.catalog = out.catalog || [];
     state.rates = {};
-    for (const c of out.catalog || []) {
+    for (const c of state.catalog) {
       if (c && c.id && c.credits) state.rates[c.id] = c.credits;
     }
     for (const r of state.rows) state.pick[r.id] = defaultPick(r);
@@ -718,6 +719,7 @@ async function verify() {
     } catch (e) { /* 记不住也不影响本次使用 */ }
   } catch (e) {
     state.models = [];
+    state.catalog = [];
     state.rates = {};
     renderModels();
     renderRows();
@@ -776,7 +778,7 @@ async function apply() {
   try {
     const out = await api('/api/apply', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ base, key, models: state.models, rates: state.rates, items })
+      body: JSON.stringify({ base, key, models: state.models, catalog: state.catalog, rates: state.rates, items })
     });
     let ok = 0, bad = 0;
     for (const it of items) {
@@ -874,7 +876,7 @@ $('btnEye').onclick = () => {
   if (state.native) initChrome();
   await scan();
   log('就绪。');
-  // 记住的密钥与地址：填好并自动验证一次，免得每次重输
+  // 记住的密钥与地址：填好并自动验证一次（免得每次重输）
   try {
     const s = await api('/api/settings');
     if (s.base) $('base').value = s.base;
