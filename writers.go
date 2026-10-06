@@ -77,6 +77,36 @@ func orderedModels(p Params) []string {
 	return out
 }
 
+// MEDIA_CONTEXT_FALLBACK 媒体行（图像/视频生成）塞进聊天客户端时的上下文占位值：
+// 它们没有 token 规格，照实写 0/空容易被客户端当坏条目（2026-09-29 ZCode 同步实测）。
+// 与门户「完整配置导出」的 workbuddyMediaEntry、tools/zcode-sync 的 MEDIA_CONTEXT_FALLBACK
+// 同一个数——三处口径保持一致，别各写一个数。
+const MEDIA_CONTEXT_FALLBACK = 32000
+
+// agentModels 返回编码 agent 配置里该列的模型清单与默认模型名：媒体行不进编码 agent
+// 的清单——与 router 自己的「完整配置导出」同一取舍（这些客户端跑不了生成任务，选了
+// 只会把编码请求变成出图轮、按张/秒扣费）。朋友把默认模型选成媒体行时退回清单里第一个
+// 非媒体模型；全量都是媒体行的退化情形原样返回，绝不写空清单。
+// WorkBuddy 与 ZCode 不走这里：它们是通用桌面端，媒体行能走 chat 出片，照全量写。
+func agentModels(p Params) (names []string, def string) {
+	all := orderedModels(p)
+	names = make([]string, 0, len(all))
+	for _, m := range all {
+		if it, ok := p.itemOf(m); ok && it.IsMedia() {
+			continue
+		}
+		names = append(names, m)
+	}
+	if len(names) == 0 {
+		return all, p.Model
+	}
+	def = p.Model
+	if it, ok := p.itemOf(def); ok && it.IsMedia() {
+		def = names[0]
+	}
+	return names, def
+}
+
 func writeDirFor(path string) error {
 	return os.MkdirAll(filepath.Dir(path), 0o755)
 }
@@ -91,7 +121,7 @@ func buildClaudeCode(home string, p Params) (map[string]string, error) {
 	}
 	env := ensureObject(root, "env")
 	delete(env, "ANTHROPIC_API_KEY")
-	m := p.Model
+	_, m := agentModels(p)
 	for k, v := range map[string]string{
 		"ANTHROPIC_BASE_URL":             p.Base,
 		"ANTHROPIC_AUTH_TOKEN":           p.Key,
@@ -150,8 +180,9 @@ func buildClaudeDesktop(home string, p Params) (map[string]string, error) {
 	profile["inferenceProvider"] = "gateway"
 	// 全量清单都进推理模型列表，名字撞 Claude 家族的补档位标记
 	seenTier := map[string]bool{}
+	names, _ := agentModels(p)
 	var inferenceModels []any
-	for _, name := range orderedModels(p) {
+	for _, name := range names {
 		entry := map[string]any{"name": name}
 		if tier := claudeFamilyTier(name); tier != "" {
 			entry["anthropicFamilyTier"] = tier
@@ -199,9 +230,10 @@ func buildCodex(home string, p Params) (map[string]string, error) {
 	dir := codexHome(home)
 	configPath := filepath.Join(dir, "config.toml")
 	src := readText(configPath)
+	names, def := agentModels(p)
 
 	src = tomlSetTop(src, "model_provider", tomlQuote(providerID))
-	src = tomlSetTop(src, "model", tomlQuote(p.Model))
+	src = tomlSetTop(src, "model", tomlQuote(def))
 	src = tomlSetTop(src, "model_catalog_json", tomlQuote(catalogFile))
 	src = tomlSetSection(src, "model_providers."+providerID, [][2]string{
 		{"name", tomlQuote(providerName)},
@@ -220,7 +252,7 @@ func buildCodex(home string, p Params) (map[string]string, error) {
 	auth["auth_mode"] = "apikey"
 	auth["OPENAI_API_KEY"] = p.Key
 
-	catalog := map[string]any{"models": catalogEntries(p)}
+	catalog := map[string]any{"models": catalogEntries(p, names)}
 	return map[string]string{
 		configPath:                      src,
 		authPath:                        renderJSON(auth),
@@ -234,9 +266,9 @@ func buildCodex(home string, p Params) (map[string]string, error) {
 // support_verbosity / truncation_policy / experimental_supported_tools，外加
 // base_instructions 或 model_messages.instructions_template 二选一）——只写 slug+display_name
 // 会让 Codex 连启动都起不来，这就是当时「给 Codex 导入了配置就再也打不开」的根因。
-func catalogEntries(p Params) []any {
+func catalogEntries(p Params, names []string) []any {
 	var out []any
-	for _, m := range orderedModels(p) {
+	for _, m := range names {
 		entry := map[string]any{
 			"slug":         m,
 			"display_name": m,
@@ -330,12 +362,13 @@ func buildOpenCode(home string, p Params) (map[string]string, error) {
 	options := ensureObject(provider, "options")
 	options["baseURL"] = p.openaiBase()
 	options["apiKey"] = p.Key
+	names, def := agentModels(p)
 	models := map[string]any{}
-	for _, m := range orderedModels(p) {
+	for _, m := range names {
 		models[m] = opencodeModelEntry(p, m)
 	}
 	provider["models"] = models
-	root["model"] = providerID + "/" + p.Model
+	root["model"] = providerID + "/" + def
 	return map[string]string{path: withLeadingComments(existing, renderJSON(root))}, nil
 }
 
@@ -407,22 +440,23 @@ func buildOpenClaw(home string, p Params) (map[string]string, error) {
 	managed["baseUrl"] = p.openaiBase()
 	managed["apiKey"] = p.Key
 	managed["api"] = "openai-completions"
+	names, def := agentModels(p)
 	var list []any
-	for _, m := range orderedModels(p) {
+	for _, m := range names {
 		list = append(list, openclawModelEntry(p, m))
 	}
 	managed["models"] = list
 
 	defaults := ensureObject(root, "agents", "defaults")
 	model := ensureObject(defaults, "model")
-	model["primary"] = providerID + "/" + p.Model
+	model["primary"] = providerID + "/" + def
 	catalog := ensureObject(defaults, "models")
 	for key := range catalog {
 		if strings.HasPrefix(key, providerID+"/") {
 			delete(catalog, key)
 		}
 	}
-	for _, m := range orderedModels(p) {
+	for _, m := range names {
 		catalog[providerID+"/"+m] = map[string]any{}
 	}
 	return map[string]string{path: withLeadingComments(existing, renderJSON(root))}, nil
@@ -471,8 +505,9 @@ func buildHermes(home string, p Params) (map[string]string, error) {
 		return nil, fmt.Errorf("Hermes config.yaml 根节点必须是映射")
 	}
 
+	names, def := agentModels(p)
 	providerModels := map[string]any{}
-	for _, m := range orderedModels(p) {
+	for _, m := range names {
 		providerModels[m] = map[string]any{}
 	}
 	var newNode yaml.Node
@@ -481,7 +516,7 @@ func buildHermes(home string, p Params) (map[string]string, error) {
 		"base_url": p.openaiBase(),
 		"api_key":  p.Key,
 		"api_mode": "chat_completions",
-		"model":    p.Model,
+		"model":    def,
 		"models":   providerModels,
 	}); err != nil {
 		return nil, err
@@ -689,7 +724,10 @@ func applyZCodeModelRules(config map[string]any, p Params) {
 			"supportsAudio": false,
 			"supportsPdf":   false,
 		}
-		if item.ContextLength != nil && *item.ContextLength > 0 {
+		// 媒体行没有 token 规格：与门户导出/zcode-sync 同款 32000 占位（空着客户端当坏条目）。
+		if item.IsMedia() {
+			props["contextWindow"] = MEDIA_CONTEXT_FALLBACK
+		} else if item.ContextLength != nil && *item.ContextLength > 0 {
 			props["contextWindow"] = *item.ContextLength
 		} else {
 			delete(props, "contextWindow")
@@ -870,6 +908,16 @@ func fillWorkBuddyCapabilities(entry map[string]any, p Params, model string) {
 	}
 	setBoolField(entry, "supportsImages", item.SupportsImages)
 	setBoolField(entry, "supportsVideos", item.SupportsVideo)
+	if item.IsMedia() {
+		// 媒体行（图像/视频生成）没有 token 规格：照实空着容易被 WorkBuddy 当坏条目
+		// （2026-09-29 实测），按门户导出 workbuddyMediaEntry 与 tools/zcode-sync 的同款
+		// 占位写——三处口径一致，别各写一个数。输出上限没有就不写（客户端不读它）。
+		entry["maxInputTokens"] = MEDIA_CONTEXT_FALLBACK
+		entry["contextLength"] = MEDIA_CONTEXT_FALLBACK
+		delete(entry, "maxAllowedSize")
+		delete(entry, "maxOutputTokens")
+		return
+	}
 	// 输入上限（max_allowed_size）是客户端真正拿来卡"一次能塞多长"的数；站点没报才退回上下文。
 	if v := firstInt(item.MaxAllowedSize, item.ContextLength); v > 0 {
 		entry["maxInputTokens"] = v
@@ -923,7 +971,8 @@ func firstInt(vs ...*int64) int64 {
 func buildKimi(home string, p Params) (map[string]string, error) {
 	path := filepath.Join(kimiHome(home), "config.toml")
 	src := readText(path)
-	src = tomlSetTop(src, "default_model", tomlQuote(providerID+"/"+p.Model))
+	names, def := agentModels(p)
+	src = tomlSetTop(src, "default_model", tomlQuote(providerID+"/"+def))
 	src = tomlSetSection(src, "providers."+providerID, [][2]string{
 		{"type", tomlQuote("openai")},
 		{"base_url", tomlQuote(p.openaiBase())},
@@ -932,7 +981,7 @@ func buildKimi(home string, p Params) (map[string]string, error) {
 	src = tomlRemoveSections(src, func(h string) bool {
 		return strings.HasPrefix(h, `models."`+providerID+`/`)
 	})
-	for _, m := range orderedModels(p) {
+	for _, m := range names {
 		src = tomlSetSection(src, `models."`+providerID+`/`+m+`"`, [][2]string{
 			{"provider", tomlQuote(providerID)},
 			{"model", tomlQuote(m)},
@@ -960,13 +1009,14 @@ func kimiContext(p Params, model string) int64 {
 func buildGrok(home string, p Params) (map[string]string, error) {
 	path := filepath.Join(grokHome(home), "config.toml")
 	src := readText(path)
+	names, def := agentModels(p)
 	src = tomlSetSection(src, "models", [][2]string{
-		{"default", tomlQuote(providerID + "/" + p.Model)},
+		{"default", tomlQuote(providerID + "/" + def)},
 	})
 	src = tomlRemoveSections(src, func(h string) bool {
 		return strings.HasPrefix(h, `model."`+providerID+`/`)
 	})
-	for _, m := range orderedModels(p) {
+	for _, m := range names {
 		src = tomlSetSection(src, `model."`+providerID+`/`+m+`"`, [][2]string{
 			{"model", tomlQuote(m)},
 			{"base_url", tomlQuote(p.openaiBase())},
@@ -996,7 +1046,8 @@ func buildAntigravity(home string, p Params) (map[string]string, error) {
 			delete(custom, key)
 		}
 	}
-	for _, name := range orderedModels(p) {
+	names, def := agentModels(p)
+	for _, name := range names {
 		custom["Aster · "+name] = map[string]any{"modelName": name}
 	}
 	root["modelProvider"] = "gemini"
@@ -1006,7 +1057,7 @@ func buildAntigravity(home string, p Params) (map[string]string, error) {
 		"provider": providerID,
 		"baseUrl":  p.Base,
 		"apiKey":   p.Key,
-		"model":    p.Model,
+		"model":    def,
 	}
 	return map[string]string{
 		settingsPath:   renderJSON(root),

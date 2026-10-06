@@ -745,3 +745,105 @@ func TestHTTPScanApplyRestore(t *testing.T) {
 		t.Fatalf("restore 状态码 %d", resp.StatusCode)
 	}
 }
+
+// TestMediaRowsSkippedByCodingAgents：媒体行（图像/视频生成）不进编码 agent 的模型清单——
+// 与 router 自己的「完整配置导出」同一取舍（这些客户端跑不了生成任务，选了只会把编码
+// 请求变成出图轮、按张/秒扣费）。WorkBuddy 与 ZCode 是通用桌面端，照全量保留；
+// 媒体行没有 token 规格，上下文按三处同款 32000 占位写，不能空着。
+func TestMediaRowsSkippedByCodingAgents(t *testing.T) {
+	home := sandbox(t)
+	p := params()
+	p.Catalog = append(p.Catalog, catalogItem{
+		ID: "minimax-image", Type: "image", Credits: "≈127 积分/张", LandingRate: "127",
+		SupportsToolCall: bp(true),
+	})
+	p.Models = append(p.Models, "minimax-image")
+	p.Model = "minimax-image" // 朋友把默认模型选成了媒体行
+
+	if _, err := applyClient(clientByID(t, "codex"), p); err != nil {
+		t.Fatal(err)
+	}
+	catalog := readJSON(filepath.Join(codexHome(home), catalogFile))
+	for _, e := range catalog["models"].([]any) {
+		if e.(map[string]any)["slug"] == "minimax-image" {
+			t.Fatal("Codex 目录不该列媒体行")
+		}
+	}
+	src := readText(filepath.Join(codexHome(home), "config.toml"))
+	if tomlTopValue(src, "model") != `"glm-5"` {
+		t.Fatalf("默认模型是媒体行时应退回第一个非媒体模型：%s", src)
+	}
+
+	if _, err := applyClient(clientByID(t, "opencode"), p); err != nil {
+		t.Fatal(err)
+	}
+	oc := readJSON(opencodeConfigPath(home))
+	models := oc["provider"].(map[string]any)["aster"].(map[string]any)["models"].(map[string]any)
+	if _, ok := models["minimax-image"]; ok {
+		t.Fatal("OpenCode 不该列媒体行")
+	}
+	if oc["model"] != "aster/glm-5" {
+		t.Fatalf("OpenCode 默认模型应退回非媒体行：%v", oc["model"])
+	}
+
+	// ZCode 与 WorkBuddy 保留媒体行（通用桌面端，媒体行能走 chat 出片）
+	if _, err := applyClient(clientByID(t, "zcode"), p); err != nil {
+		t.Fatal(err)
+	}
+	z := readJSON(filepath.Join(home, ".zcode", "v2", "provider_config.json"))
+	zcfg := z["config"].(map[string]any)
+	ids := zcfg["providerConfigRules"].(map[string]any)["providerRules"].([]any)[0].(map[string]any)["config"].(map[string]any)["personalModelIds"].([]any)
+	found := false
+	for _, id := range ids {
+		if id == "minimax-image" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ZCode 应保留媒体行：%v", ids)
+	}
+	var zimg map[string]any
+	for _, r := range zcfg["modelConfigRules"].(map[string]any)["providerModelRules"].([]any) {
+		rm := r.(map[string]any)
+		if rm["modelId"] == "minimax-image" {
+			zimg = rm
+		}
+	}
+	if zimg == nil {
+		t.Fatal("ZCode 没给媒体行写覆盖规则")
+	}
+	zc := zimg["config"].(map[string]any)
+	if zc["properties"].(map[string]any)["contextWindow"] != float64(32000) {
+		t.Fatalf("ZCode 媒体行上下文应写 32000 占位：%v", zc["properties"])
+	}
+	levels := zc["optionSpecs"].(map[string]any)["reasoningLevel"].(map[string]any)["values"].([]any)
+	if len(levels) != 1 || levels[0] != "none" {
+		t.Fatalf("ZCode 媒体行档位应是 none：%v", levels)
+	}
+
+	if _, err := applyClient(clientByID(t, "workbuddy"), p); err != nil {
+		t.Fatal(err)
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal([]byte(readText(filepath.Join(home, ".workbuddy", "models.json"))), &arr); err != nil {
+		t.Fatal(err)
+	}
+	var img map[string]any
+	for _, m := range arr {
+		if m["id"] == "minimax-image" {
+			img = m
+		}
+	}
+	if img == nil {
+		t.Fatal("WorkBuddy 应保留媒体行")
+	}
+	if img["maxInputTokens"] != float64(32000) || img["contextLength"] != float64(32000) {
+		t.Fatalf("媒体行应写 32000 上下文占位：%v", img)
+	}
+	if _, ok := img["maxOutputTokens"]; ok {
+		t.Fatalf("媒体行不该写输出上限：%v", img)
+	}
+	if img["credits"] != "≈127 积分/张" {
+		t.Fatalf("媒体行倍率文案应原样带过去：%v", img["credits"])
+	}
+}
