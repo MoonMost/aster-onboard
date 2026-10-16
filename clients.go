@@ -86,7 +86,7 @@ func (p Params) openaiBase() string { return p.Base + "/v1" }
 type Client struct {
 	ID   string
 	Name string
-	Kind string // "CLI" 或 "桌面端"
+	Kind string // "CLI" / "桌面端"；两种形态共用一份配置的标 "CLI + 桌面端"（2026-10-16 起，与门户清单定稿同口径）
 	// Paths 返回要被写入/备份的配置文件（顺序固定）。
 	Paths func(home string) []string
 	// Detect 返回"本机装了"的证据（存在的目录/文件/可执行命令）。
@@ -476,7 +476,7 @@ func allClients() []Client {
 			Build: buildClaudeDesktop,
 		},
 		{
-			ID: "codex", Name: "Codex", Kind: "CLI",
+			ID: "codex", Name: "Codex", Kind: "CLI + 桌面端",
 			Paths: func(home string) []string {
 				d := codexHome(home)
 				return []string{filepath.Join(d, "config.toml"), filepath.Join(d, "auth.json"), filepath.Join(d, catalogFile)}
@@ -494,7 +494,7 @@ func allClients() []Client {
 			Build: buildCodex,
 		},
 		{
-			ID: "opencode", Name: "OpenCode", Kind: "CLI",
+			ID: "opencode", Name: "OpenCode", Kind: "CLI + 桌面端",
 			Paths: func(home string) []string { return []string{opencodeConfigPath(home)} },
 			Detect: func(home string) []string {
 				return append(exists(filepath.Dir(opencodeConfigPath(home))), lookPath("opencode")...)
@@ -577,7 +577,7 @@ func allClients() []Client {
 			Build: buildWorkBuddy,
 		},
 		{
-			ID: "kimi", Name: "Kimi Code", Kind: "CLI",
+			ID: "kimi", Name: "Kimi Code", Kind: "CLI + 桌面端",
 			Paths: func(home string) []string { return []string{filepath.Join(kimiHome(home), "config.toml")} },
 			Detect: func(home string) []string {
 				return append(exists(kimiHome(home)), append(lookPath("kimi"), bundleEvidence("kimi")...)...)
@@ -658,7 +658,7 @@ func allClients() []Client {
 			Build: buildPi,
 		},
 		{
-			ID: "minimax-code", Name: "MiniMax Code（mcode）", Kind: "CLI",
+			ID: "minimax-code", Name: "MiniMax Code（mcode）", Kind: "CLI + 桌面端",
 			Paths: func(home string) []string {
 				return []string{filepath.Join(minimaxCodeHome(home), "config.yaml")}
 			},
@@ -672,7 +672,7 @@ func allClients() []Client {
 			Build: buildMinimaxCode,
 		},
 		{
-			ID: "qwen", Name: "Qwen Code", Kind: "CLI",
+			ID: "qwen", Name: "Qwen Code", Kind: "CLI + 桌面端",
 			Paths: func(home string) []string {
 				return []string{filepath.Join(qwenHome(home), "settings.json"), filepath.Join(qwenHome(home), ".env")}
 			},
@@ -692,7 +692,7 @@ func allClients() []Client {
 			Build: buildQwen,
 		},
 		{
-			ID: "codebuddy", Name: "CodeBuddy", Kind: "桌面端",
+			ID: "codebuddy", Name: "CodeBuddy", Kind: "CLI + 桌面端",
 			Paths: func(home string) []string {
 				return []string{filepath.Join(codebuddyHome(home), "models.json")}
 			},
