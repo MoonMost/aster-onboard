@@ -19,6 +19,15 @@ func appSupportDir(home string) string {
 	return filepath.Join(home, "AppData", "Local")
 }
 
+// configDir 是「用户配置目录」：Windows 上是 %APPDATA%（Roaming）——Chatbox / Trae CLI
+// 的数据目录都在这边（不是 LOCALAPPDATA）；沙箱测试时退回假 home 下的 AppData\Roaming。
+func configDir(home string) string {
+	if v := os.Getenv("APPDATA"); v != "" && os.Getenv("ASTER_ONBOARD_HOME") == "" {
+		return v
+	}
+	return filepath.Join(home, "AppData", "Roaming")
+}
+
 func openURL(url string) {
 	cmd := exec.Command("cmd", "/c", "start", "", url)
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr

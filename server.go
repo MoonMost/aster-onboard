@@ -237,6 +237,27 @@ func handleApply(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "缺地址、密钥或客户端", http.StatusBadRequest)
 		return
 	}
+	// 页面只负责选择 ID；能力在落盘前重新向所属站点核验，失败不写任何客户端。
+	catalog, err := fetchModels(req.Base, req.Key)
+	if err != nil {
+		http.Error(w, "落盘前核验模型清单失败", http.StatusBadGateway)
+		return
+	}
+	known := map[string]bool{}
+	for _, m := range catalog {
+		known[m.ID] = true
+	}
+	selected := append([]string{}, req.Models...)
+	for _, item := range req.Items {
+		selected = append(selected, item.Model)
+	}
+	for _, id := range selected {
+		if !known[id] {
+			http.Error(w, "所选模型不在当前站点清单中", http.StatusBadRequest)
+			return
+		}
+	}
+	req.Catalog = catalog
 	clients := map[string]Client{}
 	for _, c := range allClients() {
 		clients[c.ID] = c

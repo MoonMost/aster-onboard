@@ -81,7 +81,8 @@ func orderedModels(p Params) []string {
 // 它们没有 token 规格，照实写 0/空容易被客户端当坏条目（2026-09-29 ZCode 同步实测）。
 // 与门户「完整配置导出」的 workbuddyMediaEntry、tools/zcode-sync 的 MEDIA_CONTEXT_FALLBACK
 // 同一个数——三处口径保持一致，别各写一个数。
-const MEDIA_CONTEXT_FALLBACK = 32000
+// 2026-10-15：32000 → 1M，与 minimax 引擎 mediaContextFallback 同步提档。
+const MEDIA_CONTEXT_FALLBACK = 1000000
 
 // agentModels 返回编码 agent 配置里该列的模型清单与默认模型名：媒体行不进编码 agent
 // 的清单——与 router 自己的「完整配置导出」同一取舍（这些客户端跑不了生成任务，选了
@@ -717,41 +718,47 @@ func applyZCodeModelRules(config map[string]any, p Params) {
 		}
 		c := ensureObject(rule, "config")
 		props := ensureObject(c, "properties")
-		props["inputFormat"] = map[string]any{
-			"supportsText":  true,
-			"supportsImage": item.SupportsImages != nil && *item.SupportsImages,
-			"supportsVideo": item.SupportsVideo != nil && *item.SupportsVideo,
-			"supportsAudio": false,
-			"supportsPdf":   false,
+		inputs := ensureObject(props, "inputFormat")
+		inputs["supportsText"] = true
+		if item.SupportsImages != nil {
+			inputs["supportsImage"] = *item.SupportsImages
 		}
-		// 媒体行没有 token 规格：与门户导出/zcode-sync 同款 32000 占位（空着客户端当坏条目）。
+		if item.SupportsVideo != nil {
+			inputs["supportsVideo"] = *item.SupportsVideo
+		}
+		// 媒体行没有 token 规格：与门户导出/zcode-sync 同款占位（1M，2026-10-15 提档；空着客户端当坏条目）。
 		if item.IsMedia() {
 			props["contextWindow"] = MEDIA_CONTEXT_FALLBACK
 		} else if item.ContextLength != nil && *item.ContextLength > 0 {
 			props["contextWindow"] = *item.ContextLength
-		} else {
-			delete(props, "contextWindow")
 		}
 		// 档位：引擎声明了几档就写几档；声明了思考但没给清单的按 sync 脚本口径给 ["high"]；
 		// 完全不是思考模型给 ["none"]（客户端要一个非空数组，空数组会被校验拒掉）。
 		// 不擅自加 "disabled"——「仅思考」的模型关不掉思考，加一档等于对客户端谎报能关。
-		levels := item.ReasoningEfforts
+		levels := []string{}
+		only := item.OnlyReasoning != nil && *item.OnlyReasoning
+		for _, level := range item.ReasoningEfforts {
+			if only && (level == "none" || level == "disabled") {
+				continue
+			}
+			levels = append(levels, level)
+		}
 		if len(levels) == 0 {
-			if item.SupportsReasoning != nil && *item.SupportsReasoning {
+			if only || (item.SupportsReasoning != nil && *item.SupportsReasoning) {
 				levels = []string{"high"}
-			} else {
+			} else if item.SupportsReasoning != nil || item.IsMedia() {
 				levels = []string{"none"}
 			}
 		}
 		specs := ensureObject(c, "optionSpecs")
-		specs["reasoningLevel"] = map[string]any{"values": toAnySlice(levels)}
+		if len(levels) > 0 {
+			ensureObject(specs, "reasoningLevel")["values"] = toAnySlice(levels)
+		}
 		// 输出上限：客户端据此知道单条回复最多能写多少 token（内置 api 规则映射成
 		// max_completion_tokens）。取**组内可用最高**（item.OutCap()）而不是官网那列的最小——
 		// 那列是最弱成员的承诺值，照它写会把 384K 的模型卡在 32K。站点没报就不写。
 		if v := item.OutCap(); v > 0 {
-			specs["maxOutputTokens"] = map[string]any{"max": v}
-		} else {
-			delete(specs, "maxOutputTokens")
+			ensureObject(specs, "maxOutputTokens")["max"] = v
 		}
 	}
 	mcr["providerModelRules"] = rules
@@ -1063,4 +1070,765 @@ func buildAntigravity(home string, p Params) (map[string]string, error) {
 		settingsPath:   renderJSON(root),
 		connectionPath: renderJSON(connection),
 	}, nil
+}
+
+// ============================================================================
+// 第二批客户端写入器（2026-10-16）：DSH / Pi / MiniMax Code / Qwen Code / CodeBuddy
+// 说明见 clients.go 头顶那段；字段口径与门户「完整配置导出」逐项一致。
+// ============================================================================
+
+// providerDisplay：写进各客户端「显示名」那一格的值（门户导出同款）。
+const providerDisplay = "Aster 中转站"
+
+// apiKeyRef：写进 apiKeyEnv / envKey 的凭据引用名。门户导出（DSH_KEY_ENV）、
+// DSH 设置页（deriveKeyRef('aster') = ASTER_API_KEY）与 Qwen 的 envKey 三处同名——
+// 谁先写都互通，别改成别的拼法。
+const apiKeyRef = "ASTER_API_KEY"
+
+// codebuddyVendor：CodeBuddy 条目的 vendor 值（门户导出同款），也当托管标记用。
+const codebuddyVendor = "Aster"
+
+// piAiEfforts：pi-ai 的档位枚举——DSH 的 reasoningEfforts 键/值必须落在其中。
+var piAiEfforts = map[string]bool{
+	"off": true, "minimal": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true,
+}
+
+// ---------- YAML 节点小工具（补丁数组 / 嵌套映射用） ----------
+
+// yamlMapNode：取映射里某个键的值节点（不建、不存在返回 nil）。
+func yamlMapNode(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// yamlMapSetNode：按键替换/新增一个值节点。
+func yamlMapSetNode(mapping *yaml.Node, key string, value *yaml.Node) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content[i+1] = value
+			return
+		}
+	}
+	mapping.Content = append(mapping.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: key}, value)
+}
+
+// yamlMapRemove：删掉一个键（不存在则无事）。
+func yamlMapRemove(mapping *yaml.Node, key string) {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			mapping.Content = append(mapping.Content[:i], mapping.Content[i+2:]...)
+			return
+		}
+	}
+}
+
+// yamlMapSetInt：数字必须写成 !!int——带引号的 "1" DSH 会当字符串、凭据文件的版本校验直接拒。
+func yamlMapSetInt(mapping *yaml.Node, key string, v int64) {
+	yamlMapSetNode(mapping, key, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!int", Value: strconv.FormatInt(v, 10)})
+}
+
+// rootOf：把 Encode 出来的节点取出根（Encode(映射) 会包一层文档节点）。
+func rootOf(n *yaml.Node) *yaml.Node {
+	if n.Kind == yaml.DocumentNode && len(n.Content) > 0 {
+		return n.Content[0]
+	}
+	return n
+}
+
+// encodeYAML：Go 值 → YAML 节点（根）。
+func encodeYAML(v any) (*yaml.Node, error) {
+	var n yaml.Node
+	if err := n.Encode(v); err != nil {
+		return nil, err
+	}
+	return rootOf(&n), nil
+}
+
+// renderYAML：节点 → 文本（两格缩进，与 DSH 自己写的形状一致）。
+func renderYAML(doc *yaml.Node) (string, error) {
+	var sb strings.Builder
+	enc := yaml.NewEncoder(&sb)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		return "", err
+	}
+	enc.Close()
+	return sb.String(), nil
+}
+
+// yamlSeqEntryByID：在补丁数组里找 id == want 的条目映射。
+func yamlSeqEntryByID(seq *yaml.Node, want string) *yaml.Node {
+	if seq == nil || seq.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for _, item := range seq.Content {
+		if item.Kind == yaml.MappingNode && yamlMapGet(item, "id") == want {
+			return item
+		}
+	}
+	return nil
+}
+
+// envWithKV：.env 里设置一个 NAME=VALUE（删同名旧行，其余行与顺序原样保留）。
+func envWithKV(existing, name, value string) string {
+	var kept []string
+	for _, line := range strings.Split(existing, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), name+"=") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
+		kept = kept[:len(kept)-1]
+	}
+	kept = append(kept, name+"="+value)
+	return strings.Join(kept, "\n") + "\n"
+}
+
+// ---------- DeepSeek Harness（DSH）：profile patch + 凭据存储 ----------
+//
+// 0.2.x 起的 DSH 把用户层配置放在每个 profile 的 cordis.patch.yml（顶层 YAML 数组，
+// 按 id 命中条目后整段替换该条的 config），密钥走官方凭据存储 $DSH_HOME/.credentials.yaml
+// （version: 1 + refs）——「设置 → 模型」写的就是这两处。本工具照抄同一形状，与门户
+// 「完整配置导出」的 dsh 档字段口径逐项一致；2026-10-16 在 0.2.1-alpha.4 隔离 DSH_HOME
+// 实测：补丁零告警落地、真对话 200（含 reasoningEffort=max）。
+
+const (
+	// dshPatchEntryID：DSH 里承载 provider 路由的官方插件条目。
+	dshPatchEntryID = "llm-pi-ai"
+	// dshPatchEntryName：条目 name 字段（命中按 id，name 只做可读性）。
+	dshPatchEntryName = "@deepseek-ai/dsh-llm-pi-ai"
+	// dshDefaultModelEntryID：新会话默认模型那条的 id/name。
+	dshDefaultModelEntryID   = "agent-default-model"
+	dshDefaultModelEntryName = "@deepseek-ai/dsh-agent-default-model"
+)
+
+func buildDsh(home string, p Params) (map[string]string, error) {
+	plan := map[string]string{}
+	for _, path := range dshProfilePatches(home) {
+		src, err := dshPatchWithProvider(readText(path), p)
+		if err != nil {
+			return nil, fmt.Errorf("%s：%w", path, err)
+		}
+		plan[path] = src
+	}
+	credPath := dshCredentialsPath(home)
+	cred, err := dshCredentialsWithKey(readText(credPath), p.Key)
+	if err != nil {
+		return nil, fmt.Errorf("%s：%w", credPath, err)
+	}
+	plan[credPath] = cred
+	return plan, nil
+}
+
+// dshPatchManaged：profile patch 里已有指向本站的 provider（「已托管」判据用）。
+func dshPatchManaged(existing string) bool {
+	if strings.TrimSpace(existing) == "" {
+		return false
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(existing), &doc); err != nil || len(doc.Content) == 0 {
+		return false
+	}
+	entry := yamlSeqEntryByID(doc.Content[0], dshPatchEntryID)
+	if entry == nil {
+		return false
+	}
+	providers := yamlMapNode(yamlMapNode(entry, "config"), "providers")
+	return providers != nil && yamlMapNode(providers, providerID) != nil
+}
+
+// dshPatchWithProvider：把 providers.aster 并进（或建出）llm-pi-ai 条目。
+// 只动这一个键：同文件里别的条目、别的 provider、注释都原样保留（patch 的
+// 「按 id 整段替换 config」语义决定不能另起一条同名条目）。
+func dshPatchWithProvider(existing string, p Params) (string, error) {
+	var doc yaml.Node
+	if strings.TrimSpace(existing) == "" {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.SequenceNode}}}
+	} else if err := yaml.Unmarshal([]byte(existing), &doc); err != nil {
+		return "", fmt.Errorf("profile patch 不是合法 YAML：%w", err)
+	}
+	if len(doc.Content) == 0 {
+		doc.Content = []*yaml.Node{{Kind: yaml.SequenceNode}}
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.SequenceNode {
+		return "", fmt.Errorf("profile patch 的根必须是条目数组")
+	}
+
+	entry := yamlSeqEntryByID(root, dshPatchEntryID)
+	if entry == nil {
+		node, err := encodeYAML(map[string]any{"id": dshPatchEntryID, "name": dshPatchEntryName})
+		if err != nil {
+			return "", err
+		}
+		entry = node
+		root.Content = append(root.Content, entry)
+	}
+	providers := yamlMapMap(yamlMapMap(entry, "config"), "providers")
+	profile, err := encodeYAML(dshProviderProfile(p))
+	if err != nil {
+		return "", err
+	}
+	yamlMapSetNode(providers, providerID, profile)
+
+	// 默认模型：条目不存在时补一条指向 aster 的；已存在且指向别家时**不抢**——
+	// 那是用户自己选的默认（门户导出的口径也是「agent-default-model 用户自选」）。
+	def := p.Model
+	if def == "" {
+		if all := orderedModels(p); len(all) > 0 {
+			def = all[0]
+		}
+	}
+	defEntry := yamlSeqEntryByID(root, dshDefaultModelEntryID)
+	if defEntry == nil {
+		node, err := encodeYAML(map[string]any{
+			"id":   dshDefaultModelEntryID,
+			"name": dshDefaultModelEntryName,
+			"config": map[string]any{
+				"provider": providerID,
+				"model":    def,
+			},
+		})
+		if err != nil {
+			return "", err
+		}
+		root.Content = append(root.Content, node)
+	} else if cur := yamlMapGet(yamlMapMap(defEntry, "config"), "provider"); cur == "" || cur == providerID {
+		cfg := yamlMapMap(defEntry, "config")
+		yamlMapSetScalar(cfg, "provider", providerID)
+		if def != "" && yamlMapGet(cfg, "model") != def {
+			yamlMapSetScalar(cfg, "model", def)
+			// 模型换了：旧档位拼写对新模型未必成立（与参考项目同款处置）。
+			yamlMapRemove(cfg, "reasoningEffort")
+		}
+	}
+	return renderYAML(&doc)
+}
+
+// dshProviderProfile：providers.aster 的整段（重建式，同目录下别的 provider 不动）。
+// 字段与门户导出逐项一致：api / baseURL / apiKeyEnv / compat + 每模型的
+// contextWindow / maxTokens / input / reasoningEfforts；媒体行用占位上下文。
+func dshProviderProfile(p Params) map[string]any {
+	models := []any{}
+	for _, m := range orderedModels(p) {
+		entry := map[string]any{"id": m}
+		if item, ok := p.itemOf(m); ok {
+			if item.IsMedia() {
+				entry["contextWindow"] = MEDIA_CONTEXT_FALLBACK
+			} else if v := intOf(item.ContextLength); v > 0 {
+				entry["contextWindow"] = v
+			}
+			if v := item.OutCap(); v > 0 {
+				entry["maxTokens"] = v
+			}
+			if item.SupportsImages != nil && *item.SupportsImages {
+				entry["input"] = []any{"text", "image"}
+			}
+			if efforts := dshEfforts(item.ReasoningEfforts); len(efforts) > 0 {
+				entry["reasoningEfforts"] = efforts
+			}
+		}
+		models = append(models, entry)
+	}
+	return map[string]any{
+		"displayName": providerDisplay,
+		"api":         "openai-completions",
+		"baseURL":     p.openaiBase(),
+		"apiKeyEnv":   apiKeyRef,
+		"compat":      map[string]any{"supportsDeveloperRole": false},
+		"models":      models,
+	}
+}
+
+// dshEfforts：清单档位 → reasoningEfforts 映射（键=值=档位名）。「off」不写：本站引擎
+// 收到 reasoning_effort:"off" 会 500（2026-09-30 qoder 实测），「不选档位」本来就等于
+// 不传该参数；站外拼法也不放行（键必须落在 pi-ai 的枚举里）。
+func dshEfforts(efforts []string) map[string]any {
+	out := map[string]any{}
+	for _, e := range efforts {
+		e = strings.TrimSpace(e)
+		if e == "" || e == "off" || !piAiEfforts[e] {
+			continue
+		}
+		out[e] = e
+	}
+	return out
+}
+
+// dshCredentialsWithKey：写 $DSH_HOME/.credentials.yaml 的 refs.ASTER_API_KEY。
+// 形状照 DSH 自己的存储（credentials-local）：version: 1 + refs（POSIX 标识符 → 非空字符串）。
+// 预发布期的扁平布局（没有 version 键、顶层全是名字→值）照 DSH 的迁移方式纳进 refs 下；
+// 别的 refs / records 条目原样保留。
+func dshCredentialsWithKey(existing, key string) (string, error) {
+	var doc yaml.Node
+	if strings.TrimSpace(existing) == "" {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
+	} else if err := yaml.Unmarshal([]byte(existing), &doc); err != nil {
+		return "", fmt.Errorf("凭据文件不是合法 YAML：%w", err)
+	}
+	if len(doc.Content) == 0 {
+		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode}}
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return "", fmt.Errorf("凭据文件的根必须是映射")
+	}
+	switch ver := yamlMapGet(root, "version"); ver {
+	case "":
+		if len(root.Content) > 0 {
+			// 扁平布局：现有条目整体挪到 refs 下，再补 version。
+			refs := &yaml.Node{Kind: yaml.MappingNode, Content: root.Content}
+			root.Content = nil
+			yamlMapSetInt(root, "version", 1)
+			root.Content = append(root.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "refs"}, refs)
+		} else {
+			yamlMapSetInt(root, "version", 1)
+		}
+	case "1":
+		// 现行布局，直接用。
+	default:
+		return "", fmt.Errorf("凭据文件声明 version %s，本工具只会写 version: 1（请先用 DSH 打开一次或手工迁移）", ver)
+	}
+	yamlMapSetScalar(yamlMapMap(root, "refs"), apiKeyRef, key)
+	return renderYAML(&doc)
+}
+
+// ---------- Pi：~/.pi/agent/models.json（+ settings.json 默认模型） ----------
+//
+// 照 cc-switch 的 pi_config：provider 条目在 models.json.providers.<键>（name / baseUrl /
+// api / apiKey / models[]），Pi 自己占 settings.json 的账号与默认；本工具像对
+// Kimi/Grok 一样把默认模型也指过来（defaultProvider/defaultModel 两个键）。
+// 媒体行不进清单（编码 agent 的取舍，与 Kimi/Grok 同）。
+
+func buildPi(home string, p Params) (map[string]string, error) {
+	dir := piHome(home)
+	modelsPath := filepath.Join(dir, "models.json")
+	settingsPath := filepath.Join(dir, "settings.json")
+
+	root, err := parseJSONObject(readText(modelsPath), "Pi models.json")
+	if err != nil {
+		return nil, err
+	}
+	providers := ensureObject(root, "providers")
+	provider, _ := providers[providerID].(map[string]any)
+	if provider == nil {
+		provider = map[string]any{}
+	}
+	provider["name"] = providerDisplay
+	provider["baseUrl"] = p.openaiBase()
+	provider["api"] = "openai-completions"
+	provider["apiKey"] = p.Key
+	names, def := agentModels(p)
+	entries := []any{}
+	for _, m := range names {
+		entry := map[string]any{"id": m, "name": m}
+		if item, ok := p.itemOf(m); ok {
+			if item.SupportsReasoning != nil {
+				entry["reasoning"] = *item.SupportsReasoning
+			}
+			if item.SupportsImages != nil && *item.SupportsImages {
+				entry["input"] = []any{"text", "image"}
+			}
+			if v := intOf(item.ContextLength); v > 0 {
+				entry["contextWindow"] = v
+			}
+			if v := item.OutCap(); v > 0 {
+				entry["maxTokens"] = v
+			}
+		}
+		entries = append(entries, entry)
+	}
+	provider["models"] = entries
+	providers[providerID] = provider
+
+	settings, err := parseJSONObject(readText(settingsPath), "Pi settings.json")
+	if err != nil {
+		return nil, err
+	}
+	settings["defaultProvider"] = providerID
+	settings["defaultModel"] = def
+
+	return map[string]string{
+		modelsPath:   renderJSON(root),
+		settingsPath: renderJSON(settings),
+	}, nil
+}
+
+// ---------- MiniMax Code / mcode：~/.minimax/config.yaml ----------
+//
+// 形状照 cc-switch 的 mcode_config：custom_provider.<键>（name / kind: custom / enabled /
+// api / options{baseURL,apiKey} / models{<id>: {name, reasoning, modalities, limit}}）。
+// kind=custom 是它的托管标记：MCode 自己的账号 provider 是别的 kind、不归工具碰。
+// 媒体行不进清单（编码 CLI 取舍）。
+
+func minimaxCodeManaged(existing string) bool {
+	if strings.TrimSpace(existing) == "" {
+		return false
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(existing), &doc); err != nil || len(doc.Content) == 0 {
+		return false
+	}
+	return yamlMapNode(yamlMapNode(doc.Content[0], "custom_provider"), providerID) != nil
+}
+
+func buildMinimaxCode(home string, p Params) (map[string]string, error) {
+	path := filepath.Join(minimaxCodeHome(home), "config.yaml")
+	existing := readText(path)
+	var doc yaml.Node
+	if strings.TrimSpace(existing) == "" {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
+	} else if err := yaml.Unmarshal([]byte(existing), &doc); err != nil {
+		return nil, fmt.Errorf("MiniMax Code config.yaml 不是合法 YAML：%w", err)
+	}
+	if len(doc.Content) == 0 {
+		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode}}
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("MiniMax Code config.yaml 的根必须是映射")
+	}
+
+	models := map[string]any{}
+	names, _ := agentModels(p)
+	for _, m := range names {
+		entry := map[string]any{"name": m}
+		if item, ok := p.itemOf(m); ok {
+			if item.SupportsReasoning != nil && *item.SupportsReasoning {
+				entry["reasoning"] = true
+			}
+			inputs := []any{"text"}
+			if item.SupportsImages != nil && *item.SupportsImages {
+				inputs = append(inputs, "image")
+			}
+			entry["modalities"] = map[string]any{"input": inputs, "output": []any{"text"}}
+			limit := map[string]any{}
+			if v := intOf(item.ContextLength); v > 0 {
+				limit["context"] = v
+			}
+			if v := item.OutCap(); v > 0 {
+				limit["output"] = v
+			}
+			if len(limit) > 0 {
+				entry["limit"] = limit
+			}
+		}
+		models[m] = entry
+	}
+	provider, err := encodeYAML(map[string]any{
+		"name":    providerDisplay,
+		"kind":    "custom",
+		"enabled": true,
+		"api":     "openai-completions",
+		"options": map[string]any{"baseURL": p.openaiBase(), "apiKey": p.Key},
+		"models":  models,
+	})
+	if err != nil {
+		return nil, err
+	}
+	yamlMapSetNode(yamlMapMap(root, "custom_provider"), providerID, provider)
+	rendered, err := renderYAML(&doc)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{path: rendered}, nil
+}
+
+// ---------- Qwen Code：~/.qwen/settings.json + .env ----------
+//
+// 形状照门户导出的 qwen 档（出处 qwen-code 官方文档）：modelProviders.openai[] 一条模型一个
+// 条目（id / name / baseUrl=根/v1 / envKey / wireApi），security.auth.selectedType=openai，
+// model.name 选默认。**密钥不进 settings.json**——文件里只引用环境变量名，值写同目录 .env。
+// 本站条目靠 envKey == ASTER_API_KEY 认领；别人的条目原样保留。媒体行也列（名字带后缀，
+// 与门户导出同口径——它们走 chat 能出片）。
+
+func buildQwen(home string, p Params) (map[string]string, error) {
+	dir := qwenHome(home)
+	settingsPath := filepath.Join(dir, "settings.json")
+	envFile := filepath.Join(dir, ".env")
+
+	root, err := parseJSONObject(readText(settingsPath), "Qwen Code settings.json")
+	if err != nil {
+		return nil, err
+	}
+	ensureObject(root, "security", "auth")["selectedType"] = "openai"
+	_, def := agentModels(p)
+	ensureObject(root, "model")["name"] = def
+	providers := ensureObject(root, "modelProviders")
+	var kept []any
+	if list, ok := providers["openai"].([]any); ok {
+		for _, item := range list {
+			if m, ok := item.(map[string]any); ok && m["envKey"] == apiKeyRef {
+				continue
+			}
+			kept = append(kept, item)
+		}
+	}
+	for _, id := range orderedModels(p) {
+		name := id
+		if item, ok := p.itemOf(id); ok && item.IsMedia() {
+			name = id + "（生成类 · 走 chat 出片）"
+		}
+		kept = append(kept, map[string]any{
+			"id": id, "name": name, "baseUrl": p.openaiBase(), "envKey": apiKeyRef, "wireApi": "chat-completions",
+		})
+	}
+	providers["openai"] = kept
+
+	return map[string]string{
+		settingsPath: renderJSON(root),
+		envFile:      envWithKV(readText(envFile), apiKeyRef, p.Key),
+	}, nil
+}
+
+// ---------- CodeBuddy：~/.codebuddy/models.json ----------
+//
+// 形状照门户导出的 codebuddy 档（出处 codebuddy.cn 官方文档）：models[] 每条
+// {id, name, vendor, apiKey, url, maxInputTokens, maxOutputTokens, supportsToolCall,
+//  supportsImages, supportsReasoning}；**url 必须写接口完整路径、以 /chat/completions
+// 结尾**。文件形态与 WorkBuddy 同族（对象含 models 数组 / 纯数组两种都收）；本站条目靠
+// vendor == "Aster" 认领，别人的条目原样保留。媒体行也列（门户导出同口径）。
+
+func buildCodeBuddy(home string, p Params) (map[string]string, error) {
+	path := filepath.Join(codebuddyHome(home), "models.json")
+	existing := strings.TrimSpace(readText(path))
+	var root any = map[string]any{}
+	if existing != "" {
+		if err := json.Unmarshal([]byte(existing), &root); err != nil {
+			return nil, fmt.Errorf("CodeBuddy models.json 不是合法 JSON：%w", err)
+		}
+	}
+	isArray := false
+	if _, ok := root.([]any); ok {
+		isArray = true
+	}
+
+	var entries []any
+	for _, m := range workbuddyModels(root) {
+		if m["vendor"] != codebuddyVendor {
+			entries = append(entries, m)
+		}
+	}
+	for _, id := range orderedModels(p) {
+		entry := map[string]any{
+			"id": id, "name": id, "vendor": codebuddyVendor, "apiKey": p.Key,
+			"url": p.openaiBase() + "/chat/completions",
+		}
+		if item, ok := p.itemOf(id); ok {
+			if item.IsMedia() {
+				entry["name"] = id + "（生成类 · 走 chat 出片）"
+				entry["maxInputTokens"] = MEDIA_CONTEXT_FALLBACK
+				entry["supportsToolCall"] = false
+				entry["supportsImages"] = false
+			} else {
+				if v := firstInt(item.MaxAllowedSize, item.ContextLength); v > 0 {
+					entry["maxInputTokens"] = v
+				}
+				if v := item.OutCap(); v > 0 {
+					entry["maxOutputTokens"] = v
+				}
+				setBoolField(entry, "supportsToolCall", item.SupportsToolCall)
+				setBoolField(entry, "supportsImages", item.SupportsImages)
+				if item.SupportsReasoning != nil && *item.SupportsReasoning {
+					entry["supportsReasoning"] = true
+				}
+			}
+		}
+		entries = append(entries, entry)
+	}
+
+	if isArray {
+		root = entries
+	} else {
+		obj, _ := root.(map[string]any)
+		if obj == nil {
+			obj = map[string]any{}
+		}
+		if len(entries) == 0 {
+			delete(obj, "models")
+		} else {
+			obj["models"] = entries
+		}
+		root = obj
+	}
+	return map[string]string{path: renderJSON(root)}, nil
+}
+
+// ---------- Chatbox：%APPDATA%\xyz.chatboxapp.app|ce\config.json ----------
+//
+// Chatbox 是 electron-store 的纯 JSON（官方没有「必须走 UI」的限制，UI 只是同一个 setter），
+// 但**必须在 App 完全退出时写**——它在启动时把 config.json 读进内存、之后只认内存，运行中
+// 手改会被整个 settings 覆盖回去（页面上的通用提醒同样适用）。形状照官方 settings-schema：
+// settings.customProviders[]（{id,name,type,isCustom:true}）+ settings.providers[id]
+// （{apiHost,apiPath,apiKey,models:[{modelId,nickname,capabilities,contextWindow,maxOutput}]}），
+// 两边 id 必须一致；OpenAI 兼容的默认 host 是 https://api.openai.com/v1 + path=/chat/completions
+// ⇒ 我们写 根/v1 + /chat/completions。
+
+const (
+	// chatboxProviderID：固定 id（Chatbox 自己建的是 custom-provider-<uuid>）——固定下来
+	// 「已托管」判定与重建都用它；customProviders 里的 id 与 providers 的键必须一致。
+	chatboxProviderID = "custom-provider-aster"
+	// chatboxSettingsVersion：settings.__version。**新建文件必须写对**：不写会被当旧版
+	// 跑一遍迁移（migrateLegacyProviderSettings），字段对不上就会被丢掉。
+	chatboxSettingsVersion = 6
+)
+
+func buildChatbox(home string, p Params) (map[string]string, error) {
+	path := filepath.Join(chatboxDataDir(home), "config.json")
+	root, err := parseJSONObject(readText(path), "Chatbox config.json")
+	if err != nil {
+		return nil, err
+	}
+	settings, _ := root["settings"].(map[string]any)
+	if settings == nil {
+		settings = map[string]any{}
+		root["settings"] = settings
+	}
+	if len(settings) > 0 && settings["__version"] == nil {
+		// 老格式（2023 年前的扁平键）：官方迁移器会在下次启动时把它搬成新形状，
+		// 我们这时写进去的新形状会被迁移流程盖掉——不猜，让用户先启动一次。
+		return nil, fmt.Errorf("Chatbox 配置是老格式（settings 里没有 __version）：请先启动一次最新版 Chatbox 让它完成迁移，再回来写入")
+	}
+	if settings["__version"] == nil {
+		settings["__version"] = chatboxSettingsVersion
+	}
+
+	var kept []any
+	if list, ok := settings["customProviders"].([]any); ok {
+		for _, item := range list {
+			if m, ok := item.(map[string]any); ok && m["id"] == chatboxProviderID {
+				continue
+			}
+			kept = append(kept, item)
+		}
+	}
+	kept = append(kept, map[string]any{
+		"id": chatboxProviderID, "name": providerDisplay, "type": "openai", "isCustom": true,
+	})
+	settings["customProviders"] = kept
+
+	models := []any{}
+	for _, id := range orderedModels(p) {
+		entry := map[string]any{"modelId": id}
+		if item, ok := p.itemOf(id); ok {
+			if item.IsMedia() {
+				entry["nickname"] = id + "（生成类 · 走 chat 出片）"
+			}
+			if v := intOf(item.ContextLength); v > 0 {
+				entry["contextWindow"] = v
+			}
+			if v := item.OutCap(); v > 0 {
+				entry["maxOutput"] = v
+			}
+			caps := []any{}
+			if item.SupportsImages != nil && *item.SupportsImages {
+				caps = append(caps, "vision")
+			}
+			if item.SupportsReasoning != nil && *item.SupportsReasoning {
+				caps = append(caps, "reasoning")
+			}
+			if item.SupportsToolCall != nil && *item.SupportsToolCall {
+				caps = append(caps, "tool_use")
+			}
+			if len(caps) > 0 {
+				entry["capabilities"] = caps
+			}
+		}
+		models = append(models, entry)
+	}
+	ensureObject(settings, "providers")[chatboxProviderID] = map[string]any{
+		"apiHost":  p.openaiBase(),
+		"apiPath":  "/chat/completions",
+		"apiKey":   p.Key,
+		"models":   models,
+		"useProxy": false,
+	}
+	_, def := agentModels(p)
+	settings["defaultChatModel"] = map[string]any{"provider": chatboxProviderID, "model": def}
+
+	return map[string]string{path: renderJSON(root)}, nil
+}
+
+// ---------- Trae CLI（TraeCode 1.x）：%APPDATA%\trae_cli\trae_cli.yaml ----------
+//
+// 官方文档（docs.trae.cn/cli_model.md）：直接编辑全局 trae_cli.yaml，`models:` 数组每条
+// `- name: <展示名>` + `open_ai: {base_url, api_key, model}`（base_url 官方就写明用于
+// 「代理、中转、私有部署」）。旧条目按 name 前缀认领重建，别人的条目原样保留；媒体行不进
+// 清单（编码 CLI 的取舍，与 Kimi/Grok/Pi 同）。注意 CLI 2.0 的 ~/.trae/traecli.toml 不写。
+
+const traeModelPrefix = "Aster · "
+
+func traeManaged(existing string) bool {
+	if strings.TrimSpace(existing) == "" {
+		return false
+	}
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(existing), &doc); err != nil || len(doc.Content) == 0 {
+		return false
+	}
+	seq := yamlMapNode(doc.Content[0], "models")
+	if seq == nil || seq.Kind != yaml.SequenceNode {
+		return false
+	}
+	for _, item := range seq.Content {
+		if strings.HasPrefix(yamlMapGet(item, "name"), traeModelPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func buildTrae(home string, p Params) (map[string]string, error) {
+	path := traeConfigPath(home)
+	existing := readText(path)
+	var doc yaml.Node
+	if strings.TrimSpace(existing) == "" {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
+	} else if err := yaml.Unmarshal([]byte(existing), &doc); err != nil {
+		return nil, fmt.Errorf("Trae CLI trae_cli.yaml 不是合法 YAML：%w", err)
+	}
+	if len(doc.Content) == 0 {
+		doc.Content = []*yaml.Node{{Kind: yaml.MappingNode}}
+	}
+	root := doc.Content[0]
+	if root.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("Trae CLI trae_cli.yaml 的根必须是映射")
+	}
+	seq := yamlMapSeq(root, "models")
+	var kept []*yaml.Node
+	for _, item := range seq.Content {
+		if strings.HasPrefix(yamlMapGet(item, "name"), traeModelPrefix) {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	names, _ := agentModels(p)
+	for _, m := range names {
+		node, err := encodeYAML(map[string]any{
+			"name": traeModelPrefix + m,
+			"open_ai": map[string]any{
+				"base_url": p.openaiBase(),
+				"api_key":  p.Key,
+				"model":    m,
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+		kept = append(kept, node)
+	}
+	seq.Content = kept
+	rendered, err := renderYAML(&doc)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]string{path: rendered}, nil
 }

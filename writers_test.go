@@ -723,7 +723,11 @@ func TestHTTPScanApplyRestore(t *testing.T) {
 		t.Fatalf("扫描行数不对：%d", len(rows))
 	}
 
-	body := `{"base":"https://relay.example.top","key":"sk-test","models":["glm-5"],"items":[{"id":"zcode","model":"glm-5"}]}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"id":"glm-5","supports_images":true}]}`))
+	}))
+	defer upstream.Close()
+	body := `{"base":"` + upstream.URL + `","key":"sk-test","models":["glm-5"],"items":[{"id":"zcode","model":"glm-5"}]}`
 	resp, err = http.Post(srv.URL+"/api/apply", "application/json", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -749,7 +753,7 @@ func TestHTTPScanApplyRestore(t *testing.T) {
 // TestMediaRowsSkippedByCodingAgents：媒体行（图像/视频生成）不进编码 agent 的模型清单——
 // 与 router 自己的「完整配置导出」同一取舍（这些客户端跑不了生成任务，选了只会把编码
 // 请求变成出图轮、按张/秒扣费）。WorkBuddy 与 ZCode 是通用桌面端，照全量保留；
-// 媒体行没有 token 规格，上下文按三处同款 32000 占位写，不能空着。
+// 媒体行没有 token 规格，上下文按三处同款占位写（1M，2026-10-15 提档），不能空着。
 func TestMediaRowsSkippedByCodingAgents(t *testing.T) {
 	home := sandbox(t)
 	p := params()
@@ -813,8 +817,8 @@ func TestMediaRowsSkippedByCodingAgents(t *testing.T) {
 		t.Fatal("ZCode 没给媒体行写覆盖规则")
 	}
 	zc := zimg["config"].(map[string]any)
-	if zc["properties"].(map[string]any)["contextWindow"] != float64(32000) {
-		t.Fatalf("ZCode 媒体行上下文应写 32000 占位：%v", zc["properties"])
+	if zc["properties"].(map[string]any)["contextWindow"] != float64(1000000) {
+		t.Fatalf("ZCode 媒体行上下文应写 1M 占位（2026-10-15 提档）：%v", zc["properties"])
 	}
 	levels := zc["optionSpecs"].(map[string]any)["reasoningLevel"].(map[string]any)["values"].([]any)
 	if len(levels) != 1 || levels[0] != "none" {
@@ -837,8 +841,8 @@ func TestMediaRowsSkippedByCodingAgents(t *testing.T) {
 	if img == nil {
 		t.Fatal("WorkBuddy 应保留媒体行")
 	}
-	if img["maxInputTokens"] != float64(32000) || img["contextLength"] != float64(32000) {
-		t.Fatalf("媒体行应写 32000 上下文占位：%v", img)
+	if img["maxInputTokens"] != float64(1000000) || img["contextLength"] != float64(1000000) {
+		t.Fatalf("媒体行应写 1M 上下文占位（2026-10-15 提档）：%v", img)
 	}
 	if _, ok := img["maxOutputTokens"]; ok {
 		t.Fatalf("媒体行不该写输出上限：%v", img)
@@ -846,4 +850,56 @@ func TestMediaRowsSkippedByCodingAgents(t *testing.T) {
 	if img["credits"] != "≈127 积分/张" {
 		t.Fatalf("媒体行倍率文案应原样带过去：%v", img["credits"])
 	}
+}
+
+// TestMediaRowCarriesDeclaredImageInput：媒体行（type=image）在站点报 supports_images=true
+// 时，导入器必须把「可附图」写进两个通用桌面端——这是 2026-10-13「引擎目录→/v1/models→
+// 导入器」链路的最后一环：MiniMax Image 支持参考图（图生图），站点核定后报了这个位，
+// 客户端就该允许带图（ZCode 规则层 inputFormat.supportsImage / WorkBuddy supportsImages）。
+// 不写这条，客户端会把附件的图片字节留在门口，只给模型一行本机路径。
+func TestMediaRowCarriesDeclaredImageInput(t *testing.T) {
+	home := sandbox(t)
+	p := params()
+	p.Catalog = append(p.Catalog, catalogItem{
+		ID: "minimax-image", Type: "image", Credits: "≈76.2 积分/张",
+		SupportsImages: bp(true), SupportsToolCall: bp(true),
+	})
+	p.Models = append(p.Models, "minimax-image")
+
+	if _, err := applyClient(clientByID(t, "zcode"), p); err != nil {
+		t.Fatal(err)
+	}
+	z := readJSON(filepath.Join(home, ".zcode", "v2", "provider_config.json"))
+	zcfg := z["config"].(map[string]any)
+	var zimg map[string]any
+	for _, r := range zcfg["modelConfigRules"].(map[string]any)["providerModelRules"].([]any) {
+		rm := r.(map[string]any)
+		if rm["modelId"] == "minimax-image" {
+			zimg = rm
+		}
+	}
+	if zimg == nil {
+		t.Fatal("ZCode 没给媒体行写覆盖规则")
+	}
+	inputs := zimg["config"].(map[string]any)["properties"].(map[string]any)["inputFormat"].(map[string]any)
+	if inputs["supportsImage"] != true {
+		t.Fatalf("ZCode 媒体行应声明可附图：%v", inputs)
+	}
+
+	if _, err := applyClient(clientByID(t, "workbuddy"), p); err != nil {
+		t.Fatal(err)
+	}
+	var arr []map[string]any
+	if err := json.Unmarshal([]byte(readText(filepath.Join(home, ".workbuddy", "models.json"))), &arr); err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range arr {
+		if m["id"] == "minimax-image" {
+			if m["supportsImages"] != true {
+				t.Fatalf("WorkBuddy 媒体行应声明 supportsImages：%v", m)
+			}
+			return
+		}
+	}
+	t.Fatal("WorkBuddy 应保留媒体行")
 }

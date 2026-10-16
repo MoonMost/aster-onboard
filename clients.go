@@ -281,6 +281,104 @@ func claudeDataDir(base string, threep bool) string {
 
 func antigravityDir(home string) string { return filepath.Join(home, ".gemini", "antigravity-cli") }
 
+// ---------- 第二批客户端（2026-10-16）：DSH / Pi / MiniMax Code / Qwen Code / CodeBuddy ----------
+// 形状出处：门户「完整配置导出」的对应 builder（逐字段口径都写在那里）、cc-switch
+// （pi_config/mod.rs、mcode_config.rs）与两家官方文档；DSH 的 profile patch + 凭据存储
+// 已在 0.2.1-alpha.4 隔离 DSH_HOME 实机验证（补丁零告警落地、真对话 200）。
+
+// dshHome：DSH_HOME 环境变量可覆盖，缺省 ~/.dsh。
+func dshHome(home string) string {
+	if v := envPath("DSH_HOME"); v != "" {
+		return v
+	}
+	return filepath.Join(home, ".dsh")
+}
+
+// dshProfilePatches：DSH 每个 profile 的 cordis.patch.yml。只打**已存在**的 profile
+// （桌面端 desktop、dsh web 是 web，等等）——没跑过的 profile 不替它建，免得在朋友的
+// home 里凭空多出一个 profile 目录；一个都没有时退回 desktop（新装只跑桌面端的环境）。
+// profiles/ 下还有 node_modules（DSH 的共享依赖目录）与点开头的内部目录，都不是 profile，
+// 必须跳过——真机上就是靠这条才没把 patch 写进 profiles/node_modules/。
+func dshProfilePatches(home string) []string {
+	root := filepath.Join(dshHome(home), "profiles")
+	var out []string
+	if entries, err := os.ReadDir(root); err == nil {
+		for _, e := range entries {
+			name := e.Name()
+			if !e.IsDir() || name == "node_modules" || strings.HasPrefix(name, ".") {
+				continue
+			}
+			out = append(out, filepath.Join(root, name, "cordis.patch.yml"))
+		}
+		sort.Strings(out)
+	}
+	if len(out) == 0 {
+		out = []string{filepath.Join(root, "desktop", "cordis.patch.yml")}
+	}
+	return out
+}
+
+func dshCredentialsPath(home string) string {
+	return filepath.Join(dshHome(home), ".credentials.yaml")
+}
+
+// piHome：Pi 的 agent 目录（照 cc-switch 的探测顺序：PI_CODING_AGENT_DIR → ~/.pi/agent）。
+func piHome(home string) string {
+	if v := envPath("PI_CODING_AGENT_DIR"); v != "" {
+		return v
+	}
+	return filepath.Join(home, ".pi", "agent")
+}
+
+// minimaxCodeHome：MiniMax Code / mcode 的数据目录（官方：MINIMAX_DATA_DIR → MAVIS_DATA_DIR → ~/.minimax）。
+func minimaxCodeHome(home string) string {
+	if v := envPath("MINIMAX_DATA_DIR"); v != "" {
+		return v
+	}
+	if v := envPath("MAVIS_DATA_DIR"); v != "" {
+		return v
+	}
+	return filepath.Join(home, ".minimax")
+}
+
+// qwenHome：Qwen Code 的配置目录（~/.qwen/settings.json + .env）。
+func qwenHome(home string) string { return filepath.Join(home, ".qwen") }
+
+// codebuddyHome：CodeBuddy 的用户级配置目录（~/.codebuddy/models.json；项目级
+// <repo>/.codebuddy/models.json 会覆盖它——那份不归工具管）。
+func codebuddyHome(home string) string { return filepath.Join(home, ".codebuddy") }
+
+// chatboxDataDirs：Chatbox 的两个候选 userData 目录——都在 %APPDATA%（Roaming），
+// 不是 LOCALAPPDATA：官网分发版跑在 xyz.chatboxapp.app，自编译 CE 版（v1.17.1 起）
+// 跑在 xyz.chatboxapp.ce（官方 issue #2527 的原话）。
+func chatboxDataDirs(home string) []string {
+	base := configDir(home)
+	return []string{filepath.Join(base, "xyz.chatboxapp.app"), filepath.Join(base, "xyz.chatboxapp.ce")}
+}
+
+// chatboxDataDir：优先 config.json 已经存在的那个目录；否则选存在的目录（两边都在时选
+// 官网版）；一个都没有时也用官网版目录（与其它桌面端同一条：没启动过就没配置可写）。
+func chatboxDataDir(home string) string {
+	dirs := chatboxDataDirs(home)
+	for _, d := range dirs {
+		if _, err := os.Stat(filepath.Join(d, "config.json")); err == nil {
+			return d
+		}
+	}
+	for _, d := range dirs {
+		if st, err := os.Stat(d); err == nil && st.IsDir() {
+			return d
+		}
+	}
+	return dirs[0]
+}
+
+// traeConfigPath：TraeCode CLI（1.x）的用户级配置（官方文档：`traecli config edit` 编辑的就是它）。
+// 注意 CLI 2.0 换成了 ~/.trae/traecli.toml（schema 不同），本工具只写 1.x 这份。
+func traeConfigPath(home string) string {
+	return filepath.Join(configDir(home), "trae_cli", "trae_cli.yaml")
+}
+
 // ---------- 托管标记 ----------
 
 func managedByBaseOrProvider(path string, pointers ...string) bool {
@@ -524,6 +622,125 @@ func allClients() []Client {
 				return root != nil && root["provider"] == providerID
 			},
 			Build: buildAntigravity,
+		},
+		{
+			ID: "dsh", Name: "DeepSeek Harness（DSH）", Kind: "桌面端",
+			Paths: func(home string) []string {
+				return append(dshProfilePatches(home), dshCredentialsPath(home))
+			},
+			Detect: func(home string) []string {
+				ev := exists(dshHome(home), filepath.Join(dshHome(home), "profiles"))
+				return append(ev, lookPath("dsh")...)
+			},
+			Managed: func(home string) bool {
+				for _, path := range dshProfilePatches(home) {
+					if dshPatchManaged(readText(path)) {
+						return true
+					}
+				}
+				return false
+			},
+			Build: buildDsh,
+		},
+		{
+			ID: "pi", Name: "Pi", Kind: "CLI",
+			Paths: func(home string) []string {
+				d := piHome(home)
+				return []string{filepath.Join(d, "models.json"), filepath.Join(d, "settings.json")}
+			},
+			Detect: func(home string) []string {
+				return append(exists(piHome(home)), lookPath("pi")...)
+			},
+			Managed: func(home string) bool {
+				root := readJSON(filepath.Join(piHome(home), "models.json"))
+				return jsonPointer(root, "providers/"+providerID) != nil
+			},
+			Build: buildPi,
+		},
+		{
+			ID: "minimax-code", Name: "MiniMax Code（mcode）", Kind: "CLI",
+			Paths: func(home string) []string {
+				return []string{filepath.Join(minimaxCodeHome(home), "config.yaml")}
+			},
+			Detect: func(home string) []string {
+				ev := exists(minimaxCodeHome(home), filepath.Join(minimaxCodeHome(home), "config.yaml"))
+				return append(ev, lookPath("mcode", "mmx")...)
+			},
+			Managed: func(home string) bool {
+				return minimaxCodeManaged(readText(filepath.Join(minimaxCodeHome(home), "config.yaml")))
+			},
+			Build: buildMinimaxCode,
+		},
+		{
+			ID: "qwen", Name: "Qwen Code", Kind: "CLI",
+			Paths: func(home string) []string {
+				return []string{filepath.Join(qwenHome(home), "settings.json"), filepath.Join(qwenHome(home), ".env")}
+			},
+			Detect: func(home string) []string {
+				return append(exists(qwenHome(home)), lookPath("qwen")...)
+			},
+			Managed: func(home string) bool {
+				root := readJSON(filepath.Join(qwenHome(home), "settings.json"))
+				list, _ := jsonPointer(root, "modelProviders/openai").([]any)
+				for _, item := range list {
+					if m, ok := item.(map[string]any); ok && m["envKey"] == apiKeyRef {
+						return true
+					}
+				}
+				return false
+			},
+			Build: buildQwen,
+		},
+		{
+			ID: "codebuddy", Name: "CodeBuddy", Kind: "桌面端",
+			Paths: func(home string) []string {
+				return []string{filepath.Join(codebuddyHome(home), "models.json")}
+			},
+			Detect: func(home string) []string {
+				return append(exists(codebuddyHome(home)), lookPath("codebuddy")...)
+			},
+			Managed: func(home string) bool {
+				root := readJSON(filepath.Join(codebuddyHome(home), "models.json"))
+				for _, m := range workbuddyModels(root) {
+					if m["vendor"] == codebuddyVendor {
+						return true
+					}
+				}
+				return false
+			},
+			Build: buildCodeBuddy,
+		},
+		{
+			ID: "chatbox", Name: "Chatbox", Kind: "桌面端",
+			Paths: func(home string) []string {
+				return []string{filepath.Join(chatboxDataDir(home), "config.json")}
+			},
+			Detect: func(home string) []string {
+				return exists(chatboxDataDirs(home)...)
+			},
+			Managed: func(home string) bool {
+				root := readJSON(filepath.Join(chatboxDataDir(home), "config.json"))
+				list, _ := jsonPointer(root, "settings/customProviders").([]any)
+				for _, item := range list {
+					if m, ok := item.(map[string]any); ok && m["id"] == chatboxProviderID {
+						return true
+					}
+				}
+				return false
+			},
+			Build: buildChatbox,
+		},
+		{
+			ID: "trae", Name: "Trae CLI（TraeCode）", Kind: "CLI",
+			Paths: func(home string) []string { return []string{traeConfigPath(home)} },
+			Detect: func(home string) []string {
+				ev := exists(filepath.Join(configDir(home), "trae_cli"))
+				return append(ev, lookPath("traecli")...)
+			},
+			Managed: func(home string) bool {
+				return traeManaged(readText(traeConfigPath(home)))
+			},
+			Build: buildTrae,
 		},
 	}
 }

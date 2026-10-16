@@ -32,6 +32,12 @@ func appSupportDir(home string) string {
 	return filepath.Join(home, "Library", "Application Support")
 }
 
+// configDir 与 Windows 的 %APPDATA%（Roaming）对应：macOS 上两者是同一处
+// （Chatbox / Trae CLI 的数据也在 ~/Library/Application Support）。
+func configDir(home string) string {
+	return appSupportDir(home)
+}
+
 // openURL 优先用 Chromium 系浏览器的 app 模式开窗口（无地址栏），否则退回默认浏览器。
 func openURL(url string) {
 	candidates := []string{

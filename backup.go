@@ -257,6 +257,11 @@ func applyClient(c Client, p Params) (string, error) {
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			return "", fmt.Errorf("写入 %s 失败：%w", path, err)
 		}
+		// DSH 的凭据文件（.credentials.yaml）按官方口径是私密文件（0600）——POSIX 上收紧一下，
+		// 别比 DSH 自己写的宽；Windows 没有可表达的权限位，Chmod 是无害的空操作。
+		if filepath.Base(path) == ".credentials.yaml" {
+			_ = os.Chmod(path, 0o600)
+		}
 	}
 	// 另存一份"写入结果"，「恢复」按钮用它把配置还原成工具写好的样子；
 	// 快照失败不影响这次写入，只是少一份恢复依据。
