@@ -49,3 +49,27 @@ func TestApplyRejectsUnverifiedCatalog(t *testing.T) {
 		t.Fatalf("unverified model accepted: %d", w.Code)
 	}
 }
+
+// 2026-11-11 实测：gemini2api 的 gm-gemini-4-carbon 目录报
+// ["low","medium","high","low"]（上游把同一档映射了两次）。原样写进
+// optionSpecs.reasoningLevel.values ⇒ ZCode 的 zod 判「不能重复」⇒ **整份**
+// provider_config.json 被拒、客户端以内存空配置降级（「管理模型」里自定义 provider 全空）。
+// 与 tools/zcode-sync 的 mapEntry 同口径：去重保序。
+func TestZCodeDedupesReasoningLevels(t *testing.T) {
+	c := map[string]any{"optionSpecs": map[string]any{}}
+	config := map[string]any{"modelConfigRules": map[string]any{"providerModelRules": []any{
+		map[string]any{"providerId": providerID, "modelId": "gm-gemini-4-carbon", "config": c},
+	}}}
+	applyZCodeModelRules(config, Params{
+		Model: "gm-gemini-4-carbon", Models: []string{"gm-gemini-4-carbon"},
+		Catalog: []catalogItem{{
+			ID: "gm-gemini-4-carbon", SupportsReasoning: bp(true),
+			ReasoningEfforts: []string{"low", "medium", "high", "low"},
+		}},
+	})
+	values := c["optionSpecs"].(map[string]any)["reasoningLevel"].(map[string]any)["values"]
+	want := []any{"low", "medium", "high"}
+	if !reflect.DeepEqual(values, want) {
+		t.Fatalf("重复档位未折叠：%v（应为 %v）", values, want)
+	}
+}

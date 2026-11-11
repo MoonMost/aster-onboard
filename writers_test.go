@@ -168,6 +168,52 @@ func TestZCodeIdempotent(t *testing.T) {
 	}
 }
 
+// ZCode 3.x 把每模型覆盖层拆成智能（providerModelRules）与手动（manualProviderModelRules）
+// 两层，schema 禁止同一 Provider/Model 同时出现在两层——撞上整份 provider_config.json
+// 会被拒，客户端以内存空配置降级（2026-10-19 实测「管理模型」里自定义 provider 全空）。
+func TestZCodeYieldsToManualModelRules(t *testing.T) {
+	home := sandbox(t)
+	path := filepath.Join(home, ".zcode", "v2", "provider_config.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	seed := `{"schemaVersion":1,"config":{"modelConfigRules":{` +
+		`"manualProviderModelRules":[{"providerId":"aster","modelId":"glm-5","config":{"properties":{"contextWindow":123}}}],` +
+		`"providerModelRules":[{"providerId":"aster","modelId":"glm-5","config":{"properties":{"contextWindow":1}}}]}}}`
+	if err := os.WriteFile(path, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mustApply(t, "zcode")
+	root := readJSON(path)
+	mcr := root["config"].(map[string]any)["modelConfigRules"].(map[string]any)
+
+	auto, _ := mcr["providerModelRules"].([]any)
+	wroteQwen := false
+	for _, r := range auto {
+		m, _ := r.(map[string]any)
+		if m == nil {
+			continue
+		}
+		if m["providerId"] == providerID && m["modelId"] == "glm-5" {
+			t.Fatalf("手动层已声明 glm-5，自动层不得再写同名规则：%v", m)
+		}
+		if m["providerId"] == providerID && m["modelId"] == "qwen3-max" {
+			wroteQwen = true
+		}
+	}
+	if !wroteQwen {
+		t.Fatal("没被手动占用的模型应照常写自动规则")
+	}
+	man, _ := mcr["manualProviderModelRules"].([]any)
+	if len(man) != 1 {
+		t.Fatalf("手动层不得被改动：%v", man)
+	}
+	if cw := man[0].(map[string]any)["config"].(map[string]any)["properties"].(map[string]any)["contextWindow"]; cw != float64(123) {
+		t.Fatalf("手动层内容被改了：%v", cw)
+	}
+}
+
 func TestWorkBuddyArrayAndObjectForms(t *testing.T) {
 	home := sandbox(t)
 	dir := filepath.Join(home, ".workbuddy-ai")

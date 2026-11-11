@@ -699,7 +699,30 @@ func buildZCode(home string, p Params) (map[string]string, error) {
 func applyZCodeModelRules(config map[string]any, p Params) {
 	mcr := ensureObject(config, "modelConfigRules")
 	rules, _ := mcr["providerModelRules"].([]any)
+	// ZCode 3.x 把每模型覆盖层拆成「智能」providerModelRules 与「手动」
+	// manualProviderModelRules 两层（后者是用户在「编辑模型配置」里手存的）。
+	// schema 明令同一 Provider/Model 不能同时出现在两层——撞上不是少一条规则，而是
+	// **整份 provider_config.json 被 zod 拒绝**，客户端以内存空配置降级
+	// （2026-10-19 实测：两条 custom:gemini 撞车 → 「管理模型」里自定义 provider 全空）。
+	// 手动层归用户，这里只让路：已有手动配置的模型，自动层一条都不留。
+	manual := zcodeManualModelIDs(mcr)
+	if len(manual) > 0 {
+		kept := make([]any, 0, len(rules))
+		for _, r := range rules {
+			m, _ := r.(map[string]any)
+			if m != nil && m["providerId"] == providerID {
+				if id, _ := m["modelId"].(string); manual[id] {
+					continue
+				}
+			}
+			kept = append(kept, r)
+		}
+		rules = kept
+	}
 	for _, name := range orderedModels(p) {
+		if manual[name] {
+			continue
+		}
 		item, ok := p.itemOf(name)
 		if !ok {
 			continue
@@ -737,10 +760,20 @@ func applyZCodeModelRules(config map[string]any, p Params) {
 		// 不擅自加 "disabled"——「仅思考」的模型关不掉思考，加一档等于对客户端谎报能关。
 		levels := []string{}
 		only := item.OnlyReasoning != nil && *item.OnlyReasoning
+		// 去重保序：目录是上游给的，会把同一档映射两次（gemini2api 的 gm-gemini-4-carbon
+		// 实测报 ["low","medium","high","low"]）。重复值不是「少一档」，而是 zod 判
+		// `reasoningLevel.values 不能重复` ⇒ **整份** provider_config.json 被拒、客户端以
+		// 内存空配置降级（2026-11-11 实测：「管理模型」里自定义 provider 全空）。
+		// 与 tools/zcode-sync 的 mapEntry 同口径。
+		seenLevel := map[string]bool{}
 		for _, level := range item.ReasoningEfforts {
 			if only && (level == "none" || level == "disabled") {
 				continue
 			}
+			if seenLevel[level] {
+				continue
+			}
+			seenLevel[level] = true
 			levels = append(levels, level)
 		}
 		if len(levels) == 0 {
@@ -762,6 +795,23 @@ func applyZCodeModelRules(config map[string]any, p Params) {
 		}
 	}
 	mcr["providerModelRules"] = rules
+}
+
+// zcodeManualModelIDs 取 ZCode 手动配置层（manualProviderModelRules）里属于本
+// provider 的模型名集合。这一层由客户端「编辑模型配置」写入，工具不得覆盖。
+func zcodeManualModelIDs(mcr map[string]any) map[string]bool {
+	out := map[string]bool{}
+	list, _ := mcr["manualProviderModelRules"].([]any)
+	for _, r := range list {
+		m, _ := r.(map[string]any)
+		if m == nil || m["providerId"] != providerID {
+			continue
+		}
+		if id, ok := m["modelId"].(string); ok && id != "" {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 func toAnySlice(in []string) []any {
